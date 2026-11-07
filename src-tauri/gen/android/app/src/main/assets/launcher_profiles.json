@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "TropicaliaCraft": {
+      "name": "TropicaliaCraft",
+      "lastVersionId": "1.21.4",
+      "icon": "default"
+    }
+  },
+  "selectedProfile": "TropicaliaCraft"
+}

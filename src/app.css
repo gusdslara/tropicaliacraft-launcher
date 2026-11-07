@@ -1,0 +1,298 @@
+@import 'tailwindcss';
+
+/* ------------------------------------------------------------------ fontes (locais: o launcher funciona offline) */
+@font-face {
+  font-family: 'Minecraft';
+  src: url('/fonts/minecraft.woff2') format('woff2');
+  font-display: block;
+}
+@font-face {
+  font-family: 'MinecraftSignText';
+  src: url('/fonts/minecraft-sign-text.otf') format('opentype');
+  font-display: block;
+}
+@font-face {
+  font-family: 'Press Start 2P';
+  src: url('/fonts/press-start-2p-latin-400-normal.woff2') format('woff2');
+  font-display: swap;
+}
+
+/* ------------------------------------------------------------------ tokens (paleta do painel TropicaliaCraft) */
+:root {
+  --tp-bg: #0d1210;
+  --tp-panel: #151d19;
+  --tp-panel-2: #1b2520;
+  --tp-panel-3: #0b100e;
+  --tp-border: #2a3a31;
+  --tp-border-strong: #3b5144;
+  --tp-text: #e6efe9;
+  --tp-muted: #93a59a;
+  --tp-green: #4ade80;
+  --tp-emerald: #10b981;
+  --tp-green-dark: #15803d;
+  --tp-gold: #fbbf24;
+  --tp-red: #f87171;
+  --tp-blue: #60a5fa;
+  --tp-purple: #c084fc;
+  --bevel-hi: #2f3d36;
+  --bevel-lo: #0a0e0c;
+  color-scheme: dark;
+}
+
+@theme {
+  --font-minecraft: 'Minecraft', 'Press Start 2P', monospace;
+  --font-sign: 'MinecraftSignText', 'Minecraft', monospace;
+  --font-mono: ui-monospace, 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
+  --color-tp-bg: #0d1210;
+  --color-tp-panel: #151d19;
+  --color-tp-panel-2: #1b2520;
+  --color-tp-panel-3: #0b100e;
+  --color-tp-border: #2a3a31;
+  --color-tp-border-strong: #3b5144;
+  --color-tp-text: #e6efe9;
+  --color-tp-muted: #93a59a;
+  --color-tp-green: #4ade80;
+  --color-tp-emerald: #10b981;
+  --color-tp-gold: #fbbf24;
+  --color-tp-red: #f87171;
+  --color-tp-blue: #60a5fa;
+  --color-tp-purple: #c084fc;
+}
+
+* , *::before, *::after { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  height: 100dvh;
+  width: 100%;
+  max-width: 100vw;
+  background:
+    radial-gradient(1100px 560px at 8% -12%, #163024 0%, transparent 60%),
+    radial-gradient(900px 500px at 110% 110%, #10241b 0%, transparent 60%),
+    var(--tp-bg);
+  color: var(--tp-text);
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  user-select: none;
+}
+
+input, textarea, select, .selectable { user-select: text; }
+a { color: var(--tp-green); }
+button { font: inherit; color: inherit; }
+img.pixel, .pixel { image-rendering: pixelated; }
+
+/* scrollbar pixelada */
+::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar-track { background: var(--tp-panel-3); }
+::-webkit-scrollbar-thumb {
+  background: #3b5144;
+  box-shadow: inset 2px 2px 0 #567463, inset -2px -2px 0 #1d2a23;
+}
+::-webkit-scrollbar-thumb:hover { background: #4b6556; }
+
+/* ------------------------------------------------------------------ tipografia */
+.font-mc { font-family: var(--font-minecraft); letter-spacing: 0.04em; font-weight: 400; }
+.mc-shadow { text-shadow: 2px 2px 0 #000; }
+.mc-shadow-sm { text-shadow: 1px 1px 0 #000; }
+
+/* ------------------------------------------------------------------ TropicaliaCard (.tp-card) */
+/* Janela do jogo: faixa de grama pixelada no topo + chanfro de luz/sombra + contorno preto. */
+.tp-card {
+  --grass: 14px;
+  position: relative;
+  border: 0;
+  border-top: var(--grass) solid transparent;
+  background:
+    url('/images/grass-strip.png') 0 0 / calc(var(--grass) * 16 / 6) var(--grass) repeat-x border-box,
+    radial-gradient(ellipse at 85% 60%, rgba(34, 197, 94, 0.07), transparent 60%) padding-box,
+    linear-gradient(var(--tp-panel), var(--tp-panel)) padding-box;
+  box-shadow:
+    inset 0 2px 0 0 var(--bevel-hi),
+    inset 2px 0 0 0 var(--bevel-hi),
+    inset -2px 0 0 0 var(--bevel-lo),
+    inset 0 -2px 0 0 var(--bevel-lo),
+    0 0 0 2px #000;
+  image-rendering: pixelated;
+}
+/* sombra da quina do bloco, logo abaixo da grama */
+.tp-card::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+.tp-card.lg { --grass: 18px; }
+.tp-card.sm { --grass: 10px; }
+.tp-card.plain { border-top-width: 0; background: var(--tp-panel-2); }
+.tp-card.plain::before { display: none; }
+
+/* painel rebaixado (slot de inventário) */
+.tp-slot {
+  background: var(--tp-panel-3);
+  box-shadow:
+    inset 2px 2px 0 0 #050706,
+    inset -2px -2px 0 0 #24322b,
+    0 0 0 1px #000;
+}
+
+/* ------------------------------------------------------------------ PixelButton */
+.px-btn {
+  --face: #4b4b4b;
+  --hi: #e3e3e3;
+  --hi2: #c6c6c6;
+  --lo: #373737;
+  --lo2: #252525;
+  --ink: #fff;
+  --ink-shadow: #000;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  height: 2.5rem;
+  padding: 0 1rem;
+  font-family: var(--font-minecraft);
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--ink);
+  text-shadow: 2px 2px 0 var(--ink-shadow);
+  background: var(--face) url('/images/stone.jpg') center / 128px;
+  border: 0;
+  cursor: pointer;
+  image-rendering: pixelated;
+  box-shadow:
+    inset 0 2px 0 0 var(--hi),
+    inset 2px 0 0 0 var(--hi2),
+    inset -2px 0 0 0 var(--lo),
+    inset 0 -3px 0 0 var(--lo2),
+    0 0 0 2px #000;
+  transition: filter 0.06s, transform 0.06s;
+}
+.px-btn:hover:not(:disabled) { filter: brightness(1.18); color: #ffffa0; }
+.px-btn:active:not(:disabled) {
+  transform: translateY(2px);
+  box-shadow:
+    inset 0 2px 0 0 var(--lo2),
+    inset 2px 0 0 0 var(--lo),
+    inset -2px 0 0 0 var(--hi2),
+    inset 0 -2px 0 0 var(--hi),
+    0 0 0 2px #000;
+}
+.px-btn:focus-visible { outline: 2px solid var(--tp-emerald); outline-offset: 3px; }
+.px-btn:disabled { filter: grayscale(0.7) brightness(0.65); cursor: not-allowed; }
+
+.px-btn.emerald {
+  --hi: #86efac; --hi2: #4ade80; --lo: #052e16; --lo2: #052e16; --ink-shadow: #052e16;
+  background: linear-gradient(#16a34a, #15803d);
+}
+.px-btn.emerald:hover:not(:disabled) {
+  color: #fef08a;
+  filter: brightness(1.12);
+  box-shadow:
+    inset 0 2px 0 0 #bbf7d0, inset 2px 0 0 0 #86efac, inset -2px 0 0 0 #052e16, inset 0 -3px 0 0 #052e16,
+    0 0 0 2px #000, 0 0 18px 2px rgba(16, 185, 129, 0.45);
+}
+.px-btn.gold {
+  --hi: #fef08a; --hi2: #facc15; --lo: #78350f; --lo2: #451a03; --ink: #fef08a; --ink-shadow: #451a03;
+}
+.px-btn.danger {
+  --hi: #fca5a5; --hi2: #ef4444; --lo: #450a0a; --lo2: #2b0606; --ink-shadow: #2b0606;
+  background: linear-gradient(#b91c1c, #991b1b);
+}
+.px-btn.ghost {
+  background: transparent;
+  box-shadow: none;
+  text-shadow: none;
+  color: var(--tp-muted);
+}
+.px-btn.ghost:hover:not(:disabled) { color: var(--tp-text); background: var(--tp-panel-2); filter: none; }
+.px-btn.sm { height: 2rem; padding: 0 0.7rem; font-size: 0.68rem; gap: 0.35rem; }
+.px-btn.xs { height: 1.6rem; padding: 0 0.5rem; font-size: 0.6rem; gap: 0.3rem; }
+.px-btn.icon { width: 2.5rem; padding: 0; }
+.px-btn.sm.icon { width: 2rem; }
+
+/* O botão JOGAR gigante */
+.px-btn.play {
+  height: 4.25rem;
+  min-width: 15rem;
+  padding: 0 2.25rem;
+  font-size: 1.6rem;
+  gap: 0.85rem;
+  text-shadow: 3px 3px 0 #052e16;
+  box-shadow:
+    inset 0 3px 0 0 #86efac, inset 3px 0 0 0 #4ade80, inset -3px 0 0 0 #052e16, inset 0 -5px 0 0 #052e16,
+    0 0 0 3px #000;
+}
+.px-btn.play:hover:not(:disabled) {
+  box-shadow:
+    inset 0 3px 0 0 #bbf7d0, inset 3px 0 0 0 #86efac, inset -3px 0 0 0 #052e16, inset 0 -5px 0 0 #052e16,
+    0 0 0 3px #000, 0 0 32px 6px rgba(16, 185, 129, 0.5);
+}
+
+@media (max-width: 640px) {
+  .px-btn.play {
+    height: 3.5rem;
+    min-width: 0;
+    width: 100%;
+    font-size: 1.35rem;
+    padding: 0 1.5rem;
+    gap: 0.65rem;
+  }
+}
+
+/* ------------------------------------------------------------------ inputs */
+.tp-input, .tp-select {
+  width: 100%;
+  height: 2.4rem;
+  padding: 0 0.75rem;
+  background: var(--tp-panel-3);
+  color: var(--tp-text);
+  border: 0;
+  box-shadow: inset 2px 2px 0 0 #050706, inset -2px -2px 0 0 #24322b, 0 0 0 1px #000;
+  font: inherit;
+  outline: none;
+}
+textarea.tp-input { height: auto; padding: 0.6rem 0.75rem; resize: vertical; }
+.tp-input:focus, .tp-select:focus { box-shadow: inset 2px 2px 0 0 #050706, inset -2px -2px 0 0 #24322b, 0 0 0 2px var(--tp-emerald); }
+.tp-input::placeholder { color: #5f7368; }
+.tp-label { display: block; font-size: 12px; font-weight: 600; color: #c7d5cc; margin-bottom: 6px; }
+.tp-help { font-size: 12px; color: var(--tp-muted); margin-top: 5px; }
+
+input[type='range'].tp-range { width: 100%; accent-color: var(--tp-emerald); }
+
+/* ------------------------------------------------------------------ utilidades */
+.tp-muted { color: var(--tp-muted); }
+.tp-divider { height: 2px; background: var(--bevel-lo); box-shadow: 0 1px 0 var(--bevel-hi); }
+.grass-block-bg { background: url('/images/grass-block-side.png') 0 0 / 48px 48px; image-rendering: pixelated; }
+
+@keyframes tp-spin { to { transform: rotate(360deg); } }
+.spin { animation: tp-spin 0.9s linear infinite; }
+@keyframes tp-pop { from { transform: translateY(6px); opacity: 0; } to { transform: none; opacity: 1; } }
+.pop { animation: tp-pop 0.16s ease-out; }
+@keyframes tp-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+.float { animation: tp-float 3.2s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .float, .pop { animation: none; } }
+
+/* ------------------------------------------------------------------ responsividade e mobile safe-areas */
+.scrollbar-none {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  .tp-input, .tp-select {
+    font-size: 14px; /* evita zoom automático indesejado no iOS / webviews */
+    min-height: 42px;
+  }
+}
