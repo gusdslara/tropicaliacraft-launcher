@@ -2,7 +2,7 @@
 	import '../app.css';
 	import { page } from '$app/state';
 	import { app } from '$lib/state.svelte';
-	import { detectLanguage, i18n } from '$lib/i18n';
+	import { i18n, resolveLanguage } from '$lib/i18n';
 	import AccountsModal from '$lib/components/AccountsModal.svelte';
 	import UpdateModal from '$lib/components/UpdateModal.svelte';
 	import Toasts from '$lib/components/Toasts.svelte';
@@ -10,8 +10,8 @@
 
 	let { children } = $props();
 
-	const lang = $derived(detectLanguage());
-	const t = $derived(i18n[lang] || i18n.pt);
+	const lang = $derived(resolveLanguage(app.settings.language));
+	const t = $derived(i18n[lang] || i18n.en);
 
 	$effect(() => {
 		app.init();
@@ -54,7 +54,7 @@
 			{/each}
 		</nav>
 
-		<button class="account" onclick={() => (app.accountsOpen = true)} title="Trocar de conta">
+		<button class="account" onclick={() => (app.accountsOpen = true)} title={t.account}>
 			{#if acc}
 				<img src={avatar} alt="" class="pixel shrink-0" onerror={(e) => ((e.currentTarget as HTMLImageElement).src = '/images/steve-head.png')} />
 				<span class="account-info min-w-0 text-left">
@@ -64,8 +64,8 @@
 			{:else}
 				<img src="/images/steve-head.png" alt="" class="pixel shrink-0 opacity-50" />
 				<span class="account-info text-left">
-					<b class="font-mc mc-shadow-sm block">Entrar</b>
-					<small class="hidden sm:block">Adicionar conta</small>
+					<b class="font-mc mc-shadow-sm block">{t.signIn}</b>
+					<small class="hidden sm:block">{t.addAccount}</small>
 				</span>
 			{/if}
 			<ChevronDown size={14} class="shrink-0 text-zinc-400" />

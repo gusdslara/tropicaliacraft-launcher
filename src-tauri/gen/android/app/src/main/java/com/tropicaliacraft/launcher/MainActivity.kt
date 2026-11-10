@@ -218,6 +218,7 @@ class MainActivity : TauriActivity() {
       }
       launcherCfg.put("name", username)
       launcherCfg.put("server", server)
+      launcherCfg.put("lang", lang)
       if (gameDir.isNotEmpty()) {
         launcherCfg.put("game_dir", gameDir)
       } else {
@@ -244,11 +245,26 @@ class MainActivity : TauriActivity() {
         if (!gd.exists()) gd.mkdirs()
         targetDirs.add(gd)
       }
+      val langRegex = Regex("(?m)^lang:.*$")
       for (dir in targetDirs) {
         val optFile = File(dir, "options.txt")
         val text = if (optFile.exists()) optFile.readText() else ""
-        if (!text.contains("lang:")) {
-          optFile.writeText((text.trimEnd() + "\nlang:$lang\nonboardAccessibility:false\nskipMultiplayerWarning:true\n").trimStart())
+        var updated = if (langRegex.containsMatchIn(text)) {
+          langRegex.replace(text, "lang:$lang")
+        } else {
+          (text.trimEnd() + "\nlang:$lang").trimStart()
+        }
+        if (!updated.contains("onboardAccessibility:")) {
+          updated = updated.trimEnd() + "\nonboardAccessibility:false"
+        }
+        if (!updated.contains("skipMultiplayerWarning:")) {
+          updated = updated.trimEnd() + "\nskipMultiplayerWarning:true"
+        }
+        if (!updated.endsWith("\n")) {
+          updated += "\n"
+        }
+        if (updated != text) {
+          optFile.writeText(updated)
         }
       }
     } catch (e: Throwable) {
@@ -364,10 +380,10 @@ class MainActivity : TauriActivity() {
   private fun unpackBundledAssets() {
     Thread {
       try {
+        copyAssetFile("engine-data.zip", File(filesDir, "engine-data.zip"))
         val destDir = File(filesDir, "components")
         if (!destDir.exists()) destDir.mkdirs()
         copyAssetFolder("components", filesDir)
-        copyAssetFile("engine-data.zip", File(filesDir, "engine-data.zip"))
       } catch (e: Exception) {
         e.printStackTrace()
       }
@@ -389,13 +405,20 @@ class MainActivity : TauriActivity() {
 
   private fun copyAssetFile(srcPath: String, dstFile: File) {
     if (dstFile.exists() && dstFile.length() > 0) return
+    val tmpFile = File(dstFile.parentFile, "${dstFile.name}.part")
     try {
+      dstFile.parentFile?.mkdirs()
       assets.open(srcPath).use { input ->
-        FileOutputStream(dstFile).use { output ->
+        FileOutputStream(tmpFile).use { output ->
           input.copyTo(output)
         }
       }
+      if (!tmpFile.renameTo(dstFile)) {
+        tmpFile.copyTo(dstFile, overwrite = true)
+        tmpFile.delete()
+      }
     } catch (e: Exception) {
+      tmpFile.delete()
       e.printStackTrace()
     }
   }

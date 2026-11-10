@@ -101,6 +101,8 @@ pub struct LaunchRequest {
     pub horizon_pregen: Option<bool>,
     #[serde(default)]
     pub horizon_args: Option<Vec<String>>,
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -596,6 +598,10 @@ fn extract_natives(natives: &[(PathBuf, Vec<String>)], dest: &Path) -> Result<()
 }
 
 pub fn extract_zip_archive(zip_file_path: &Path, dest_dir: &Path) -> Result<(), String> {
+    extract_zip_prefixes(zip_file_path, dest_dir, &[])
+}
+
+pub fn extract_zip_prefixes(zip_file_path: &Path, dest_dir: &Path, prefixes: &[&str]) -> Result<(), String> {
     std::fs::create_dir_all(dest_dir).map_err(|e| e.to_string())?;
     let file = std::fs::File::open(zip_file_path).map_err(|e| format!("{}: {e}", zip_file_path.display()))?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
@@ -603,6 +609,9 @@ pub fn extract_zip_archive(zip_file_path: &Path, dest_dir: &Path) -> Result<(), 
         let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
         let name = entry.name().to_string();
         if entry.is_dir() {
+            continue;
+        }
+        if !prefixes.is_empty() && !prefixes.iter().any(|p| name.starts_with(p)) {
             continue;
         }
         let Ok(out) = paths::join_inside(dest_dir, &name) else { continue };
@@ -780,8 +789,14 @@ fn map_to_mc_language(raw: &str) -> &'static str {
     }
 }
 
-fn sync_options_language(game_dir: &Path) {
-    let mc_lang = map_to_mc_language(&detect_system_locale());
+fn resolve_mc_language(preferred: Option<&str>) -> &'static str {
+    if let Some(raw) = preferred.map(str::trim).filter(|s| !s.is_empty()) {
+        return map_to_mc_language(&raw.to_lowercase().replace('-', "_"));
+    }
+    map_to_mc_language(&detect_system_locale())
+}
+
+fn sync_options_language(game_dir: &Path, mc_lang: &str) {
     let options_path = game_dir.join("options.txt");
 
     if !options_path.exists() {
@@ -799,7 +814,7 @@ fn sync_options_language(game_dir: &Path) {
             if line.starts_with("lang:") {
                 found = true;
                 let val = line.trim_start_matches("lang:").trim();
-                if val.is_empty() {
+                if val != mc_lang {
                     new_lines.push(format!("lang:{mc_lang}"));
                     changed = true;
                 } else {
@@ -928,7 +943,8 @@ pub async fn game_launch(app: AppHandle, state: State<'_, AppState>, req: Launch
         extract_natives(&plan.natives, &natives_dir)?;
     }
 
-    sync_options_language(&game_dir);
+    let mc_lang = resolve_mc_language(req.language.as_deref());
+    sync_options_language(&game_dir, mc_lang);
 
     #[cfg(target_os = "android")]
     {
@@ -1088,7 +1104,8 @@ pub async fn game_launch(app: AppHandle, state: State<'_, AppState>, req: Launch
         final_args = vec![format!("@{}", argfile.to_string_lossy())];
     }
 
-    sync_options_language(&game_dir);
+    let mc_lang = resolve_mc_language(req.language.as_deref());
+    sync_options_language(&game_dir, mc_lang);
 
     let mut cmd = tokio::process::Command::new(&java);
     cmd.args(&final_args).current_dir(&game_dir).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -1169,7 +1186,8 @@ pub async fn launch_horizon_rust(app: &AppHandle, state: &State<'_, AppState>, r
     let game_dir = paths::instance(app, &owner)?;
     let mods_dir = game_dir.join("horizon-mods");
     let _ = std::fs::create_dir_all(&mods_dir);
-    sync_options_language(&game_dir);
+    let mc_lang = resolve_mc_language(req.language.as_deref());
+    sync_options_language(&game_dir, mc_lang);
     sync_horizon_options_to_dir(&game_dir, req)?;
 
     // Preparar arquivo de sessão caso o usuário esteja autenticado (Microsoft / MSA)
@@ -1195,10 +1213,11 @@ pub async fn launch_horizon_rust(app: &AppHandle, state: &State<'_, AppState>, r
 
     #[cfg(target_os = "android")]
     {
-        let _ = state;
-        download::emit(app, &owner, "launch", 1, 1, "Iniciando Horizon Rust (26.3) no Android…");
         let root_dir = paths::root(app)?;
-        let mc_lang = map_to_mc_language(&detect_system_locale());
+        let horizon_home = resolve_horizon_android_home(&root_dir);
+        ensure_horizon_android_resources(app, state, &owner, &horizon_home, &game_dir).await?;
+
+        download::emit(app, &owner, "launch", 1, 1, "Iniciando Minecraft Rust (26.3)…");
 
         let mut extra_args: Vec<String> = Vec::new();
         if let Some(rd) = req.horizon_render_distance {
@@ -1228,24 +1247,25 @@ pub async fn launch_horizon_rust(app: &AppHandle, state: &State<'_, AppState>, r
             "lang": mc_lang,
             "extra_arguments": extra_args,
         });
-        let _ = std::fs::write(root_dir.join("android-launcher.json"), serde_json::to_vec_pretty(&launcher_cfg).unwrap());
-        let _ = std::fs::write(root_dir.join("android-launch.json"), serde_json::to_vec(&extra_args).unwrap());
-        let _ = std::fs::write(root_dir.join("tropicalia-auto.flag"), b"1");
-        sync_options_language(&root_dir);
-        let _ = sync_horizon_options_to_dir(&root_dir, req);
-        let trigger_file = root_dir.join("tropicalia-horizon-launch.json");
-        std::fs::write(&trigger_file, serde_json::to_vec_pretty(&launcher_cfg).unwrap())
+        let cfg_bytes = serde_json::to_vec_pretty(&launcher_cfg).unwrap();
+        let args_bytes = serde_json::to_vec(&extra_args).unwrap();
+
+        let _ = std::fs::create_dir_all(&horizon_home);
+        let _ = std::fs::write(horizon_home.join("android-launcher.json"), &cfg_bytes);
+        let _ = std::fs::write(horizon_home.join("android-launch.json"), &args_bytes);
+        let _ = std::fs::write(horizon_home.join("tropicalia-auto.flag"), b"1");
+        sync_options_language(&horizon_home, mc_lang);
+        let _ = sync_horizon_options_to_dir(&horizon_home, req);
+        std::fs::write(horizon_home.join("tropicalia-horizon-launch.json"), &cfg_bytes)
             .map_err(|e| format!("Falha ao acionar o motor Horizon Rust Android: {e}"))?;
 
-        // Também grava em files/ caso self.home aponte para filesDir
-        let files_dir = root_dir.join("files");
-        if files_dir.exists() || std::fs::create_dir_all(&files_dir).is_ok() {
-            let _ = std::fs::write(files_dir.join("android-launcher.json"), serde_json::to_vec_pretty(&launcher_cfg).unwrap());
-            let _ = std::fs::write(files_dir.join("android-launch.json"), serde_json::to_vec(&extra_args).unwrap());
-            let _ = std::fs::write(files_dir.join("tropicalia-auto.flag"), b"1");
-            sync_options_language(&files_dir);
-            let _ = sync_horizon_options_to_dir(&files_dir, req);
-            let _ = std::fs::write(files_dir.join("tropicalia-horizon-launch.json"), serde_json::to_vec_pretty(&launcher_cfg).unwrap());
+        if root_dir != horizon_home {
+            let _ = std::fs::write(root_dir.join("android-launcher.json"), &cfg_bytes);
+            let _ = std::fs::write(root_dir.join("android-launch.json"), &args_bytes);
+            let _ = std::fs::write(root_dir.join("tropicalia-auto.flag"), b"1");
+            sync_options_language(&root_dir, mc_lang);
+            let _ = sync_horizon_options_to_dir(&root_dir, req);
+            let _ = std::fs::write(root_dir.join("tropicalia-horizon-launch.json"), &cfg_bytes);
         }
 
         let _ = app.emit("game://started", json!({ "owner": owner, "pid": 1 }));
@@ -1627,7 +1647,7 @@ fn sync_horizon_options_to_dir(game_dir: &Path, req: &LaunchRequest) -> Result<(
     if let Some(rd) = req.horizon_render_distance {
         opt_updates.insert("renderDistance", rd.to_string());
     }
-    let mc_lang = map_to_mc_language(&detect_system_locale());
+    let mc_lang = resolve_mc_language(req.language.as_deref());
     opt_updates.insert("lang", mc_lang.to_string());
     opt_updates.insert("onboardAccessibility", "false".to_string());
     opt_updates.insert("skipMultiplayerWarning", "true".to_string());
@@ -1878,6 +1898,331 @@ pub async fn horizon_options_set(app: AppHandle, instance_id: String, options: H
     Ok(())
 }
 
+const BEDROCK_CONTROLS_JSON: &str = include_str!("../bedrock-controls.json");
+
+const HORIZON_WORLDGEN: &[(&str, &str)] = &[
+    ("noises", "worldgen/noise"),
+    ("densities", "worldgen/density_function"),
+    ("rules", "worldgen/material_rule"),
+    ("conditions", "worldgen/material_condition"),
+    ("settings", "worldgen/noise_settings"),
+    ("carvers", "worldgen/carver"),
+    ("biomes", "worldgen/biome"),
+    ("world_presets", "worldgen/world_preset"),
+    ("features", "worldgen/feature"),
+    ("placed_features", "worldgen/placed_feature"),
+    ("state_providers", "worldgen/block_state_provider"),
+    ("biome_tags", "tags/worldgen/biome"),
+    ("feature_tags", "tags/worldgen/feature"),
+    ("block_tags", "tags/block"),
+    ("fluid_tags", "tags/fluid"),
+    ("processor_lists", "worldgen/processor_list"),
+    ("template_pools", "worldgen/template_pool"),
+    ("structures", "worldgen/structure"),
+    ("structure_sets", "worldgen/structure_set"),
+];
+
+#[allow(dead_code)]
+fn resolve_horizon_android_home(root_dir: &Path) -> PathBuf {
+    if root_dir.file_name().is_some_and(|n| n == "files") {
+        root_dir.to_path_buf()
+    } else {
+        root_dir.join("files")
+    }
+}
+
+fn horizon_android_ready(ver_dir: &Path) -> bool {
+    ver_dir.join("horizon-resources.json").is_file()
+        && ver_dir.join("android-downloads-v2.json").is_file()
+        && ver_dir.join("audio-complete.json").is_file()
+        && ver_dir
+            .join("worldgen/blocks/structure-blocks.json")
+            .metadata()
+            .is_ok_and(|m| m.len() > 2)
+        && ver_dir.join("worldgen/noises.json").is_file()
+        && ver_dir.join("assets/minecraft/lang/en_us.json").is_file()
+        && ver_dir.join("assets/minecraft/textures/gui/bedrock/LICENSE.md").is_file()
+}
+
+fn walk_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    if !root.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(root).map_err(|e| e.to_string())? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.is_dir() {
+            walk_files(&path, out)?;
+        } else {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn aggregate_worldgen_dir(root: &Path, source: &str, target: &str) -> Result<(), String> {
+    let base = root.join("data/minecraft").join(source);
+    let mut files = Vec::new();
+    walk_files(&base, &mut files)?;
+    files.sort();
+    let mut values = serde_json::Map::new();
+    for file in files {
+        if file.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        let relative = file.strip_prefix(&base).map_err(|e| e.to_string())?.with_extension("");
+        let key = format!("minecraft:{}", relative.to_string_lossy().replace('\\', "/"));
+        let contents = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+        values.insert(key, Value::String(contents));
+    }
+    let out_path = root.join(target);
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let bytes = serde_json::to_vec(&values).map_err(|e| e.to_string())?;
+    std::fs::write(out_path, bytes).map_err(|e| e.to_string())
+}
+
+fn rebuild_android_worldgen_resources(root: &Path) -> Result<(), String> {
+    for (name, source) in HORIZON_WORLDGEN {
+        aggregate_worldgen_dir(root, source, &format!("worldgen/{name}.json"))?;
+    }
+    for (name, source) in [
+        ("block-tags", "tags/block"),
+        ("damage-tags", "tags/damage_type"),
+        ("damage-types", "damage_type"),
+    ] {
+        aggregate_worldgen_dir(root, source, &format!("{name}.json"))?;
+    }
+    let structure_base = root.join("data/minecraft/structure");
+    let mut structures = Vec::new();
+    walk_files(&structure_base, &mut structures)?;
+    for file in structures {
+        if file.extension().is_none_or(|ext| ext != "nbt") {
+            continue;
+        }
+        let rel = file.strip_prefix(&structure_base).map_err(|e| e.to_string())?;
+        let target = root.join("worldgen/structure/minecraft").join(rel);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::copy(&file, &target).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn bedrock_control_entries() -> Result<(String, Vec<(PathBuf, String, u64, String)>), String> {
+    let manifest: Value = serde_json::from_str(BEDROCK_CONTROLS_JSON)
+        .map_err(|e| format!("bedrock-controls.json inválido: {e}"))?;
+    let revision = manifest["revision"]
+        .as_str()
+        .ok_or_else(|| "Manifesto de controles sem revision".to_string())?
+        .to_string();
+    let entries = manifest["files"]
+        .as_array()
+        .ok_or_else(|| "Manifesto de controles sem files".to_string())?;
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let name = entry["path"].as_str().ok_or("Controle sem path")?;
+        let hash = entry["sha256"].as_str().ok_or("Controle sem sha256")?.to_string();
+        let size = entry["size"]
+            .as_u64()
+            .filter(|n| *n <= 1024 * 1024)
+            .ok_or("Tamanho de controle inválido")?;
+        let relative = Path::new(name);
+        if relative.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+            return Err(format!("Caminho de controle inválido: {name}"));
+        }
+        let source = if name == "LICENSE.md" {
+            "LICENSE.md".to_string()
+        } else {
+            format!(
+                "resource_pack/textures/{}",
+                entry["source"].as_str().ok_or("Controle sem source")?
+            )
+        };
+        let url = format!("https://raw.githubusercontent.com/Mojang/bedrock-samples/{revision}/{source}");
+        out.push((relative.to_path_buf(), hash, size, url));
+    }
+    Ok((revision, out))
+}
+
+#[allow(dead_code)]
+async fn ensure_horizon_android_resources(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    owner: &str,
+    horizon_home: &Path,
+    game_dir: &Path,
+) -> Result<(), String> {
+    let versions_dir = horizon_home.join(".local").join("horizon-client");
+    let ver_dir = versions_dir.join("26.3");
+    if horizon_android_ready(&ver_dir) {
+        return Ok(());
+    }
+
+    // Aguarda engine-data.zip caso MainActivity ainda esteja copiando dos assets do APK.
+    let engine_zip = horizon_home.join("engine-data.zip");
+    let mut waited_ms = 0u32;
+    while !engine_zip.metadata().is_ok_and(|m| m.len() > 0) && waited_ms < 20_000 {
+        if waited_ms == 0 {
+            download::emit(app, owner, "horizon-prepare", 0, 4, "Aguardando dados do motor Horizon Rust…");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        waited_ms += 250;
+    }
+    if !engine_zip.metadata().is_ok_and(|m| m.len() > 0) {
+        return Err("Dados internos do motor Horizon Rust (engine-data.zip) não encontrados".into());
+    }
+
+    let shared = paths::shared(app)?;
+    download::emit(app, owner, "version", 0, 1, "Obtendo manifesto oficial do Minecraft 26.3…");
+    let version_json = ensure_vanilla_json(&state.http, &shared, "26.3").await?;
+    download::emit(app, owner, "version", 1, 1, "Manifesto do Minecraft 26.3 pronto");
+
+    let client_jar = shared.join("versions").join("26.3").join("26.3.jar");
+    let client_dl = version_json.pointer("/downloads/client");
+    let jar_url = client_dl
+        .and_then(|v| v.get("url"))
+        .and_then(Value::as_str)
+        .unwrap_or(MC_26_3_CLIENT_JAR_URL)
+        .to_string();
+    let jar_sha1 = client_dl
+        .and_then(|v| v.get("sha1"))
+        .and_then(Value::as_str)
+        .unwrap_or(MC_26_3_CLIENT_JAR_SHA1)
+        .to_string();
+    let jar_size = client_dl.and_then(|v| v.get("size")).and_then(Value::as_u64);
+
+    download::emit(app, owner, "jar", 0, 1, "Baixando cliente oficial do Minecraft 26.3…");
+    download::fetch(
+        &state.http,
+        &Job {
+            url: jar_url,
+            path: client_jar.clone(),
+            sha1: Some(jar_sha1),
+            sha256: None,
+            size: jar_size,
+        },
+    )
+    .await?;
+    download::emit(app, owner, "jar", 1, 1, "Cliente oficial do Minecraft 26.3 verificado");
+
+    let (asset_id, _game_assets) = ensure_assets(app, &state.http, owner, &version_json, &shared, game_dir).await?;
+    let index_path = shared
+        .join("assets")
+        .join("indexes")
+        .join(format!("{}.json", paths::safe_name(&asset_id)?));
+
+    let (_revision, controls) = bedrock_control_entries()?;
+    let controls_cache = shared.join("horizon-controls");
+    let control_jobs: Vec<Job> = controls
+        .iter()
+        .map(|(rel, hash, size, url)| Job {
+            url: url.clone(),
+            path: controls_cache.join(rel),
+            sha1: None,
+            sha256: Some(hash.clone()),
+            size: Some(*size),
+        })
+        .collect();
+    download::fetch_all(app, &state.http, owner, "assets", control_jobs, 16).await?;
+
+    let app_clone = app.clone();
+    let owner_clone = owner.to_string();
+    let shared_clone = shared.clone();
+    let versions_clone = versions_dir.clone();
+    let controls_rel: Vec<PathBuf> = controls.into_iter().map(|(rel, _, _, _)| rel).collect();
+
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        std::fs::create_dir_all(&versions_clone).map_err(|e| e.to_string())?;
+        let stage = versions_clone.join("26.3.staging");
+        if stage.exists() {
+            let _ = std::fs::remove_dir_all(&stage);
+        }
+        std::fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
+
+        let prep_res: Result<(), String> = (|| {
+            download::emit(&app_clone, &owner_clone, "horizon-prepare", 1, 4, "Extraindo texturas e dados do Minecraft 26.3…");
+            extract_zip_prefixes(&client_jar, &stage, &["assets/", "data/"])?;
+
+            download::emit(&app_clone, &owner_clone, "horizon-prepare", 2, 4, "Preparando sons, idiomas e controles táteis…");
+            let index_bytes = std::fs::read(&index_path).map_err(|e| e.to_string())?;
+            let index: Value = serde_json::from_slice(&index_bytes).map_err(|e| e.to_string())?;
+            let objects_root = shared_clone.join("assets").join("objects");
+            let stage_assets = stage.join("assets");
+            if let Some(objects) = index.get("objects").and_then(Value::as_object) {
+                for (name, obj) in objects {
+                    let Some(hash) = obj.get("hash").and_then(Value::as_str) else { continue };
+                    if hash.len() < 2 {
+                        continue;
+                    }
+                    let Ok(dest) = paths::join_inside(&stage_assets, name) else { continue };
+                    if let Some(parent) = dest.parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                    }
+                    let src = objects_root.join(&hash[..2]).join(hash);
+                    std::fs::copy(&src, &dest)
+                        .map_err(|e| format!("Falha ao preparar asset {name}: {e}"))?;
+                }
+            }
+
+            let bedrock_dest = stage.join("assets/minecraft/textures/gui/bedrock");
+            for rel in &controls_rel {
+                let dst = bedrock_dest.join(rel);
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                std::fs::copy(controls_cache.join(rel), &dst)
+                    .map_err(|e| format!("Falha ao copiar controle {}: {e}", rel.display()))?;
+            }
+
+            extract_zip_archive(&engine_zip, &stage)?;
+
+            download::emit(&app_clone, &owner_clone, "horizon-prepare", 3, 4, "Compilando tabelas de geração de mundo…");
+            rebuild_android_worldgen_resources(&stage)?;
+
+            download::emit(&app_clone, &owner_clone, "horizon-prepare", 4, 4, "Ativando recursos do Horizon Rust…");
+            if !stage.join("horizon-resources.json").is_file() {
+                return Err("engine-data.zip não contém horizon-resources.json para 26.3".into());
+            }
+            std::fs::write(stage.join("android-downloads-v2.json"), b"{\"schema\":2}").map_err(|e| e.to_string())?;
+            std::fs::write(stage.join("asset-index.json"), &index_bytes).map_err(|e| e.to_string())?;
+            std::fs::write(stage.join("audio-complete.json"), b"{}").map_err(|e| e.to_string())?;
+
+            let dest = versions_clone.join("26.3");
+            let backup = versions_clone.join("26.3.previous");
+            if backup.exists() && !dest.exists() {
+                std::fs::rename(&backup, &dest).map_err(|e| e.to_string())?;
+            }
+            if backup.exists() {
+                let _ = std::fs::remove_dir_all(&backup);
+            }
+            if dest.exists() {
+                std::fs::rename(&dest, &backup).map_err(|e| e.to_string())?;
+            }
+            if let Err(e) = std::fs::rename(&stage, &dest) {
+                if backup.exists() {
+                    let _ = std::fs::rename(&backup, &dest);
+                }
+                return Err(format!("Falha ao ativar recursos preparados: {e}"));
+            }
+            if backup.exists() {
+                let _ = std::fs::remove_dir_all(&backup);
+            }
+            Ok(())
+        })();
+
+        if stage.exists() {
+            let _ = std::fs::remove_dir_all(&stage);
+        }
+        prep_res
+    })
+    .await
+    .map_err(|e| format!("Erro na tarefa de preparação Android: {e}"))??;
+
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn horizon_prepare_sync(app: AppHandle, state: State<'_, AppState>, instance_id: String) -> Result<(), String> {
     ensure_horizon_engine(&app, &state, &instance_id, true).await?;
@@ -1942,5 +2287,51 @@ mod tests {
         let plan = plan_libraries(&m, Path::new("/tmp/libs")).unwrap();
         assert_eq!(plan.classpath.len(), 1, "asm duplicado deve ser removido");
         assert!(plan.classpath[0].to_string_lossy().contains("9.7"));
+    }
+
+    #[test]
+    fn bedrock_controls_manifest_parses() {
+        let (revision, entries) = bedrock_control_entries().unwrap();
+        assert!(!revision.is_empty());
+        assert!(!entries.is_empty());
+        assert!(entries.iter().any(|(p, _, _, _)| p == Path::new("LICENSE.md")));
+    }
+
+    #[test]
+    fn rebuild_worldgen_and_ready_check() {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("tropicalia-worldgen-test-{}-{stamp}", std::process::id()));
+        let noise_dir = root.join("data/minecraft/worldgen/noise/sub");
+        std::fs::create_dir_all(&noise_dir).unwrap();
+        std::fs::write(noise_dir.join("test.json"), r#"{"amplitude":1}"#).unwrap();
+        let struct_dir = root.join("data/minecraft/structure/village");
+        std::fs::create_dir_all(&struct_dir).unwrap();
+        std::fs::write(struct_dir.join("house.nbt"), b"nbt").unwrap();
+
+        rebuild_android_worldgen_resources(&root).unwrap();
+        let noises: Value = serde_json::from_slice(&std::fs::read(root.join("worldgen/noises.json")).unwrap()).unwrap();
+        assert_eq!(noises["minecraft:sub/test"], r#"{"amplitude":1}"#);
+        assert_eq!(std::fs::read(root.join("worldgen/structure/minecraft/village/house.nbt")).unwrap(), b"nbt");
+
+        assert!(!horizon_android_ready(&root));
+        std::fs::write(root.join("horizon-resources.json"), b"{}").unwrap();
+        std::fs::write(root.join("android-downloads-v2.json"), b"{\"schema\":2}").unwrap();
+        std::fs::write(root.join("audio-complete.json"), b"{}").unwrap();
+        std::fs::create_dir_all(root.join("worldgen/blocks")).unwrap();
+        std::fs::write(root.join("worldgen/blocks/structure-blocks.json"), br#"{"rotate":[1]}"#).unwrap();
+        std::fs::create_dir_all(root.join("assets/minecraft/lang")).unwrap();
+        std::fs::write(root.join("assets/minecraft/lang/en_us.json"), b"{}").unwrap();
+        std::fs::create_dir_all(root.join("assets/minecraft/textures/gui/bedrock")).unwrap();
+        std::fs::write(root.join("assets/minecraft/textures/gui/bedrock/LICENSE.md"), b"ok").unwrap();
+        assert!(horizon_android_ready(&root));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn mc_language_resolution() {
+        assert_eq!(resolve_mc_language(Some("pt_BR")), "pt_br");
+        assert_eq!(resolve_mc_language(Some("es-ES")), "es_es");
+        assert_eq!(resolve_mc_language(Some("en_US")), "en_us");
     }
 }

@@ -107,6 +107,7 @@ export interface Settings {
 	perfProfile: 'economico' | 'equilibrado' | 'maximo';
 	hideOnLaunch: boolean;
 	showSnapshots: boolean;
+	language?: 'auto' | 'pt' | 'en' | 'es';
 	lastInstanceId?: string;
 	activeAccountId?: string;
 }

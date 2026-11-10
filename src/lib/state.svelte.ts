@@ -1,4 +1,5 @@
 // Estado global do launcher (Svelte 5 runes). Persistido no plugin-store do Tauri.
+import { i18n, resolveLanguage, resolveMinecraftLocale } from '$lib/i18n';
 import { call, isTauri, kv, on, secrets } from '$lib/platform';
 import * as ms from '$lib/services/microsoft-auth';
 import { checkForLauncherUpdates, type CheckUpdateResult } from '$lib/services/updates';
@@ -86,7 +87,10 @@ const STAGE_LABEL: Record<string, string> = {
 	modpack: 'Modpack',
 	server: 'Servidor'
 };
-export const stageLabel = (s: string) => STAGE_LABEL[s] ?? s;
+export const stageLabel = (s: string) => {
+	const lang = resolveLanguage(app?.settings?.language);
+	return i18n[lang]?.stages[s] ?? STAGE_LABEL[s] ?? s;
+};
 
 class App {
 	ready = $state(false);
@@ -96,7 +100,8 @@ class App {
 		defaultMemoryMb: 4096,
 		perfProfile: 'equilibrado',
 		hideOnLaunch: true,
-		showSnapshots: false
+		showSnapshots: false,
+		language: 'auto'
 	});
 	system = $state({ totalMemoryMb: 8192, os: 'windows', arch: 'x86_64', cpus: 4 });
 	accounts = $state<Account[]>([]);
@@ -440,7 +445,8 @@ class App {
 					horizonPregen: inst.horizonOptions?.pregen ?? null,
 					resolution: inst.resolution ?? null,
 					hideOnLaunch: this.settings.hideOnLaunch,
-					serverAddress: serverAddress ?? inst.autoJoin ?? null
+					serverAddress: serverAddress ?? inst.autoJoin ?? null,
+					language: resolveMinecraftLocale(this.settings.language)
 				}
 			});
 			inst.lastPlayedAt = new Date().toISOString();
