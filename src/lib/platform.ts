@@ -53,10 +53,17 @@ export async function openUrl(url: string) {
 	window.open(url, '_blank', 'noopener');
 }
 
-export async function openFolder(what: 'instance' | 'server' | 'root', id?: string) {
-	const path = await call<string>('path_of', { what, id });
+export async function openFolder(what: 'instance' | 'server' | 'root', id?: string, sub?: string) {
+	const path = await call<string>('path_of', { what, id, sub });
 	const { openPath } = await import('@tauri-apps/plugin-opener');
 	return openPath(path);
+}
+
+export async function openPath(path: string) {
+	if (isTauri) {
+		const { openPath } = await import('@tauri-apps/plugin-opener');
+		return openPath(path);
+	}
 }
 
 // ------------------------------------------------------------------ armazenamento chave/valor

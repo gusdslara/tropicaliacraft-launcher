@@ -20,6 +20,84 @@ pub struct ContentFile {
     pub sha1: Option<String>,
 }
 
+fn extract_horizon_mod_id(filename: &str) -> String {
+    let clean = filename.strip_suffix(".disabled").unwrap_or(filename);
+    let stem = clean
+        .strip_suffix(".hmod")
+        .or_else(|| clean.strip_suffix(".hnmod"))
+        .or_else(|| clean.strip_suffix(".jar"))
+        .unwrap_or(clean);
+    if let Some((id, ver)) = stem.split_once('-') {
+        if ver.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+            return id.to_string();
+        }
+    }
+    stem.to_string()
+}
+
+fn update_horizon_mods_txt(base_dir: &Path, mod_id: &str, enabled: bool) {
+    let path = base_dir.join("horizon-mods.txt");
+    let mut lines: Vec<String> = if path.exists() {
+        std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .lines()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let target_prefix = format!("mod.{mod_id}:");
+    let new_line = format!("mod.{mod_id}:{}", if enabled { "true" } else { "false" });
+    let mut found = false;
+
+    for line in &mut lines {
+        if line.trim().starts_with(&target_prefix) {
+            *line = new_line.clone();
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        lines.push(new_line);
+    }
+
+    let _ = std::fs::write(&path, lines.join("\n") + "\n");
+}
+
+fn remove_from_horizon_mods_txt(base_dir: &Path, mod_id: &str) {
+    let path = base_dir.join("horizon-mods.txt");
+    if !path.exists() {
+        return;
+    }
+    let target_prefix = format!("mod.{mod_id}:");
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        let lines: Vec<String> = content
+            .lines()
+            .filter(|l| !l.trim().starts_with(&target_prefix))
+            .map(|s| s.to_string())
+            .collect();
+        let _ = std::fs::write(&path, lines.join("\n") + "\n");
+    }
+}
+
+fn read_horizon_mods_state(base_dir: &Path) -> std::collections::HashMap<String, bool> {
+    let mut map = std::collections::HashMap::new();
+    let path = base_dir.join("horizon-mods.txt");
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if let Some((k, v)) = trimmed.split_once(':') {
+                if let Some(id) = k.trim().strip_prefix("mod.") {
+                    map.insert(id.to_string(), v.trim() == "true");
+                }
+            }
+        }
+    }
+    map
+}
+
 fn base_dir(app: &AppHandle, owner_kind: &str, owner_id: &str) -> Result<PathBuf, String> {
     match owner_kind {
         "server" => paths::server(app, owner_id),
@@ -44,7 +122,11 @@ fn resolve_content_dir(app: &AppHandle, owner_kind: &str, owner_id: &str, kind: 
 
 #[tauri::command]
 pub fn content_list(app: AppHandle, owner_kind: String, owner_id: String, kind: String, with_hash: Option<bool>) -> Result<Vec<ContentFile>, String> {
+    let base = base_dir(&app, &owner_kind, &owner_id)?;
     let dir = resolve_content_dir(&app, &owner_kind, &owner_id, &kind)?;
+    let is_horizon = dir.ends_with("horizon-mods") || base.join("horizon-mods.txt").exists();
+    let horizon_states = if is_horizon { read_horizon_mods_state(&base) } else { std::collections::HashMap::new() };
+
     let mut out = Vec::new();
     let Ok(rd) = std::fs::read_dir(&dir) else { return Ok(out) };
     for e in rd.flatten() {
@@ -56,10 +138,18 @@ pub fn content_list(app: AppHandle, owner_kind: String, owner_id: String, kind: 
             Ok(m) => m,
             Err(_) => continue,
         };
-        let (filename, enabled) = match name.strip_suffix(".disabled") {
+        let (filename, mut enabled) = match name.strip_suffix(".disabled") {
             Some(n) => (n.to_string(), false),
             None => (name.clone(), true),
         };
+
+        if is_horizon {
+            let mod_id = extract_horizon_mod_id(&filename);
+            if let Some(&hz_enabled) = horizon_states.get(&mod_id) {
+                enabled = hz_enabled && enabled;
+            }
+        }
+
         let sha1 = if with_hash.unwrap_or(false) && meta.is_file() { download::sha1_file(&e.path()) } else { None };
         out.push(ContentFile { filename, enabled, size: meta.len(), sha1 });
     }
@@ -69,26 +159,101 @@ pub fn content_list(app: AppHandle, owner_kind: String, owner_id: String, kind: 
 
 #[tauri::command]
 pub fn content_toggle(app: AppHandle, owner_kind: String, owner_id: String, kind: String, filename: String, enabled: bool) -> Result<(), String> {
+    let base = base_dir(&app, &owner_kind, &owner_id)?;
     let dir = resolve_content_dir(&app, &owner_kind, &owner_id, &kind)?;
     let name = paths::safe_name(&filename)?;
-    let on = dir.join(name);
+    let on = dir.join(&name);
     let off = dir.join(format!("{name}.disabled"));
     let (from, to) = if enabled { (off, on) } else { (on, off) };
-    if !from.exists() {
-        return if to.exists() { Ok(()) } else { Err(format!("Arquivo não encontrado: {name}")) };
+
+    if from.exists() {
+        let _ = std::fs::rename(from, to);
     }
-    std::fs::rename(from, to).map_err(|e| e.to_string())
+
+    if dir.ends_with("horizon-mods") || base.join("horizon-mods.txt").exists() || name.ends_with(".hmod") || name.ends_with(".hnmod") {
+        let mod_id = extract_horizon_mod_id(&name);
+        update_horizon_mods_txt(&base, &mod_id, enabled);
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
 pub fn content_delete(app: AppHandle, owner_kind: String, owner_id: String, kind: String, filename: String) -> Result<(), String> {
+    let base = base_dir(&app, &owner_kind, &owner_id)?;
     let dir = resolve_content_dir(&app, &owner_kind, &owner_id, &kind)?;
     let name = paths::safe_name(&filename)?;
-    for p in [dir.join(name), dir.join(format!("{name}.disabled"))] {
+    for p in [dir.join(&name), dir.join(format!("{name}.disabled"))] {
         if p.is_dir() {
             std::fs::remove_dir_all(&p).map_err(|e| e.to_string())?;
         } else if p.exists() {
             std::fs::remove_file(&p).map_err(|e| e.to_string())?;
+        }
+    }
+
+    if dir.ends_with("horizon-mods") || base.join("horizon-mods.txt").exists() || name.ends_with(".hmod") || name.ends_with(".hnmod") {
+        let mod_id = extract_horizon_mod_id(&name);
+        remove_from_horizon_mods_txt(&base, &mod_id);
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn horizon_mods_state_get(app: AppHandle, instance_id: String) -> Result<std::collections::HashMap<String, bool>, String> {
+    let base = paths::instance(&app, &instance_id)?;
+    Ok(read_horizon_mods_state(&base))
+}
+
+#[tauri::command]
+pub fn horizon_mods_state_set(app: AppHandle, instance_id: String, mod_id: String, enabled: bool) -> Result<(), String> {
+    let base = paths::instance(&app, &instance_id)?;
+    update_horizon_mods_txt(&base, &mod_id, enabled);
+
+    let dir = base.join("horizon-mods");
+    if dir.exists() {
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for entry in rd.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if extract_horizon_mod_id(&name) == mod_id {
+                    let is_disabled = name.ends_with(".disabled");
+                    if enabled && is_disabled {
+                        let clean = name.strip_suffix(".disabled").unwrap_or(&name);
+                        let _ = std::fs::rename(entry.path(), dir.join(clean));
+                    } else if !enabled && !is_disabled {
+                        let off = format!("{name}.disabled");
+                        let _ = std::fs::rename(entry.path(), dir.join(off));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn horizon_mods_state_set_bulk(app: AppHandle, instance_id: String, states: std::collections::HashMap<String, bool>) -> Result<(), String> {
+    let base = paths::instance(&app, &instance_id)?;
+    for (id, enabled) in &states {
+        update_horizon_mods_txt(&base, id, *enabled);
+    }
+    let dir = base.join("horizon-mods");
+    if dir.exists() {
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for entry in rd.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let mod_id = extract_horizon_mod_id(&name);
+                if let Some(&enabled) = states.get(&mod_id) {
+                    let is_disabled = name.ends_with(".disabled");
+                    if enabled && is_disabled {
+                        let clean = name.strip_suffix(".disabled").unwrap_or(&name);
+                        let _ = std::fs::rename(entry.path(), dir.join(clean));
+                    } else if !enabled && !is_disabled {
+                        let off = format!("{name}.disabled");
+                        let _ = std::fs::rename(entry.path(), dir.join(off));
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -114,10 +279,24 @@ pub async fn content_install(
     kind: String,
     files: Vec<InstallFile>,
 ) -> Result<(), String> {
+    let base = base_dir(&app, &owner_kind, &owner_id)?;
     let dir = resolve_content_dir(&app, &owner_kind, &owner_id, &kind)?;
+    let is_horizon = dir.ends_with("horizon-mods") || base.join("horizon-mods.txt").exists();
+
     let mut jobs = Vec::new();
-    for f in files {
-        jobs.push(Job { url: f.url, path: dir.join(paths::safe_name(&f.filename)?), sha1: f.sha1, sha256: f.sha256, size: f.size });
+    for f in &files {
+        jobs.push(Job {
+            url: f.url.clone(),
+            path: dir.join(paths::safe_name(&f.filename)?),
+            sha1: f.sha1.clone(),
+            sha256: f.sha256.clone(),
+            size: f.size,
+        });
+
+        if is_horizon || f.filename.ends_with(".hmod") || f.filename.ends_with(".hnmod") {
+            let mod_id = extract_horizon_mod_id(&f.filename);
+            update_horizon_mods_txt(&base, &mod_id, true);
+        }
     }
     download::fetch_all(&app, &state.http, &owner_id, "content", jobs, 6).await
 }
@@ -154,13 +333,19 @@ fn copy_dir(from: &Path, to: &Path, skip: &[&str]) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn path_of(app: AppHandle, what: String, id: Option<String>) -> Result<String, String> {
-    let p = match what.as_str() {
+pub fn path_of(app: AppHandle, what: String, id: Option<String>, sub: Option<String>) -> Result<String, String> {
+    let mut p = match what.as_str() {
         "instance" => paths::instance(&app, id.as_deref().unwrap_or_default())?,
         "server" => paths::server(&app, id.as_deref().unwrap_or_default())?,
         "root" => paths::root(&app)?,
         other => return Err(format!("pasta desconhecida: {other}")),
     };
+    if let Some(s) = sub {
+        if !s.is_empty() {
+            p = p.join(s);
+            let _ = std::fs::create_dir_all(&p);
+        }
+    }
     Ok(p.to_string_lossy().to_string())
 }
 

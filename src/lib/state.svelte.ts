@@ -1,5 +1,4 @@
 // Estado global do launcher (Svelte 5 runes). Persistido no plugin-store do Tauri.
-import { i18n, resolveLanguage, resolveMinecraftLocale } from '$lib/i18n';
 import { call, isTauri, kv, on, secrets } from '$lib/platform';
 import * as ms from '$lib/services/microsoft-auth';
 import { checkForLauncherUpdates, type CheckUpdateResult } from '$lib/services/updates';
@@ -85,23 +84,26 @@ const STAGE_LABEL: Record<string, string> = {
 	launch: 'Abrindo',
 	content: 'Conteúdo',
 	modpack: 'Modpack',
-	server: 'Servidor'
+	server: 'Servidor',
+	'horizon-mc': 'Minecraft 26.3',
+	'horizon-engine': 'Motor Horizon Rust',
+	'horizon-prepare': 'Preparando Recursos Rust',
+	'horizon-launch': 'Iniciando Vulkan',
+	'horizon-world': 'Carregando Mundo'
 };
-export const stageLabel = (s: string) => {
-	const lang = resolveLanguage(app?.settings?.language);
-	return i18n[lang]?.stages[s] ?? STAGE_LABEL[s] ?? s;
-};
+export const stageLabel = (s: string) => STAGE_LABEL[s] ?? s;
 
 class App {
 	ready = $state(false);
 	settings = $state<Settings>({
 		msClientId: import.meta.env.VITE_MS_CLIENT_ID ?? '',
 		javaPath: '',
+		defaultJavaRenderer: 'opengles_mobileglues',
+		defaultUseAngle: false,
 		defaultMemoryMb: 4096,
 		perfProfile: 'equilibrado',
 		hideOnLaunch: true,
-		showSnapshots: false,
-		language: 'auto'
+		showSnapshots: false
 	});
 	system = $state({ totalMemoryMb: 8192, os: 'windows', arch: 'x86_64', cpus: 4 });
 	accounts = $state<Account[]>([]);
@@ -163,7 +165,7 @@ class App {
 		}
 
 		if (this.instances.length === 0) {
-			const defaultInst: Instance = {
+			const defaultRust: Instance = {
 				id: 'tropicaliacraft-rust',
 				name: 'TropicaliaCraft (Rust)',
 				gameVersion: '26.3',
@@ -176,10 +178,45 @@ class App {
 				createdAt: new Date().toISOString(),
 				playTimeMinutes: 0
 			};
-			this.instances.push(defaultInst);
-			this.settings.lastInstanceId = defaultInst.id;
+			const defaultJava: Instance = {
+				id: 'tropicaliacraft-java',
+				name: 'TropicaliaCraft (Java)',
+				gameVersion: '1.20.1',
+				loader: 'fabric',
+				engine: 'java',
+				icon: 'iron',
+				javaRenderer: this.settings.defaultJavaRenderer || 'opengles_mobileglues',
+				useAngle: this.settings.defaultUseAngle || false,
+				javaRuntime: '',
+				memory: { minMb: 1024, maxMb: this.settings.defaultMemoryMb || 2048 },
+				jvmArgs: '',
+				content: {},
+				createdAt: new Date().toISOString(),
+				playTimeMinutes: 0
+			};
+			this.instances.push(defaultRust, defaultJava);
+			this.settings.lastInstanceId = defaultRust.id;
 			this.saveInstances();
 			this.saveSettings();
+		} else if (!this.instances.some((i) => i.loader !== 'horizon-rust')) {
+			const defaultJava: Instance = {
+				id: 'tropicaliacraft-java',
+				name: 'TropicaliaCraft (Java)',
+				gameVersion: '1.20.1',
+				loader: 'fabric',
+				engine: 'java',
+				icon: 'iron',
+				javaRenderer: this.settings.defaultJavaRenderer || 'opengles_mobileglues',
+				useAngle: this.settings.defaultUseAngle || false,
+				javaRuntime: '',
+				memory: { minMb: 1024, maxMb: this.settings.defaultMemoryMb || 2048 },
+				jvmArgs: '',
+				content: {},
+				createdAt: new Date().toISOString(),
+				playTimeMinutes: 0
+			};
+			this.instances.push(defaultJava);
+			this.saveInstances();
 		}
 
 		if (isTauri) {
@@ -358,6 +395,9 @@ class App {
 		const inst: Instance = {
 			memory: { minMb: 512, maxMb: this.settings.defaultMemoryMb },
 			jvmArgs: '',
+			javaRenderer: this.settings.defaultJavaRenderer || 'opengles_mobileglues',
+			useAngle: this.settings.defaultUseAngle || false,
+			javaRuntime: '',
 			content: {},
 			createdAt: new Date().toISOString(),
 			playTimeMinutes: 0,
@@ -417,22 +457,25 @@ class App {
 			await call('game_launch', {
 				req: {
 					instanceId: inst.id,
+					engine: inst.engine ?? (inst.loader === 'horizon-rust' ? 'rust' : 'java'),
 					gameVersion: inst.gameVersion,
 					loader: inst.loader,
 					loaderVersion: inst.loaderVersion ?? null,
-					engine: inst.engine ?? (inst.loader === 'horizon-rust' ? 'rust' : 'java'),
 					account,
 					memoryMinMb: inst.memory.minMb,
 					memoryMaxMb: inst.memory.maxMb,
 					jvmArgs,
 					javaPath: inst.javaPath || this.settings.javaPath || null,
+					javaRenderer: inst.javaRenderer || this.settings.defaultJavaRenderer || 'opengles_mobileglues',
+					useAngle: inst.useAngle ?? this.settings.defaultUseAngle ?? false,
+					javaRuntime: inst.javaRuntime || null,
 					rustBinaryPath: inst.rustBinaryPath ?? null,
 					horizonRenderDistance: inst.horizonOptions?.renderDistance ?? null,
 					horizonLodDistance: inst.horizonOptions?.lodDistance ?? null,
 					horizonCaveCulling: inst.horizonOptions?.caveCulling ?? null,
 					horizonEntityCulling: inst.horizonOptions?.entityCulling ?? null,
 					horizonAnimatedTextures: inst.horizonOptions?.animatedTextures ?? null,
-					horizonFxaa: inst.horizonOptions?.fxaa ?? null,
+					horizonFxaa: inst.horizonOptions?.antialiasing === 'fxaa' || !!inst.horizonOptions?.fxaa,
 					horizonFullbright: inst.horizonOptions?.fullbright ?? null,
 					horizonDynamicLights: inst.horizonOptions?.dynamicLights ?? null,
 					horizonZoom: inst.horizonOptions?.zoom ?? null,
@@ -443,10 +486,10 @@ class App {
 					horizonCreative: inst.horizonOptions?.creative ?? null,
 					horizonTestTerrain: inst.horizonOptions?.testTerrain ?? null,
 					horizonPregen: inst.horizonOptions?.pregen ?? null,
+					horizonOptions: inst.horizonOptions ?? null,
 					resolution: inst.resolution ?? null,
 					hideOnLaunch: this.settings.hideOnLaunch,
-					serverAddress: serverAddress ?? inst.autoJoin ?? null,
-					language: resolveMinecraftLocale(this.settings.language)
+					serverAddress: serverAddress ?? inst.autoJoin ?? null
 				}
 			});
 			inst.lastPlayedAt = new Date().toISOString();

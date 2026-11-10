@@ -6,7 +6,7 @@
 		help,
 		disabled = false,
 		onchange
-	}: { checked: boolean; label?: string; help?: string; disabled?: boolean; onchange?: (v: boolean) => void } = $props();
+	}: { checked?: boolean; label?: string; help?: string; disabled?: boolean; onchange?: (v: boolean) => void } = $props();
 </script>
 
 <label class="row" class:disabled>

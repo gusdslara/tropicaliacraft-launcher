@@ -1,7 +1,7 @@
 // Contratos do launcher (adaptados de tropicalia-launcher-lab/engine-specs).
 
 export type ModLoader = 'vanilla' | 'fabric' | 'quilt' | 'forge' | 'neoforge' | 'horizon-rust';
-export type EngineType = 'java' | 'rust' | 'java_pojav' | 'java_native';
+export type EngineType = 'java' | 'rust';
 export type ContentKind = 'mod' | 'resourcepack' | 'shader' | 'datapack' | 'modpack' | 'plugin';
 
 export interface Account {
@@ -35,26 +35,111 @@ export interface InstalledContent {
 export type BlockIcon = 'grass' | 'stone' | 'diamond' | 'gold' | 'iron' | 'creeper' | 'steve';
 
 export interface HorizonOptions {
+	// Gráficos e Renderização Vulkan
+	preset?: 'performance' | 'balanced' | 'quality' | 'ultra' | 'custom';
 	renderDistance?: number;
 	lodDistance?: number;
-	farDetail?: 'full' | 'simple' | 'off';
+	farDetail?: 'full' | 'simple' | 'reduced' | 'off';
+	framerateLimit?: number;
+	presentMode?: 'auto' | 'fifo' | 'mailbox' | 'immediate';
+	resolutionScale?: number;
+	antialiasing?: 'off' | 'fxaa' | 'taa';
+	fxaa?: boolean;
+	upscaling?: 'native' | 'quality' | 'balanced' | 'performance' | 'ultraPerformance';
 	caveCulling?: boolean;
 	entityCulling?: boolean;
 	animatedTextures?: boolean;
-	fxaa?: boolean;
+	ditherCutoutMips?: boolean;
 	sky?: boolean;
 	fog?: boolean;
 	weather?: boolean;
+	chunkUpdates?: number;
+	uploadBudgetKiB?: number;
+	workers?: number;
+	shadowCache?: boolean;
+	graphicsApi?: 'auto' | 'vulkan' | 'dx12' | 'opengl';
+
+	// HDR
+	hdr?: boolean;
+	hdrPaperWhite?: number;
+	hdrPeak?: number;
+	hdrBlackLevel?: number;
+	hdrUiBrightness?: number;
+
+	// Áudio e Sons
+	soundMaster?: number;
+	soundMusic?: number;
+	soundWeather?: number;
+	soundBlocks?: number;
+	soundHostile?: number;
+	soundNeutral?: number;
+	soundPlayers?: number;
+	soundAmbient?: number;
+	soundVoice?: number;
+	directionalAudio?: boolean;
+	subtitles?: boolean;
+
+	// Visão, HUD e Câmera
+	fov?: number;
+	gamma?: number;
+	viewBobbing?: boolean;
+	attackIndicator?: 'off' | 'crosshair' | 'hotbar';
+	guiScale?: number;
+	menuBlur?: number;
+	highContrast?: boolean;
+
+	// Extras Integrados do Horizon
 	fullbright?: boolean;
 	dynamicLights?: boolean;
 	zoom?: boolean;
+	zoomKey?: string;
+	zoomLevel?: number;
+	zoomSmooth?: boolean;
+	zoomSensitivity?: boolean;
 	fps?: boolean;
+	fpsCorner?: 'top_left' | 'top_right' | 'bottom_left' | 'bottom_right';
+	fpsLows?: boolean;
 	keystrokes?: boolean;
+	keystrokesCorner?: 'top_left' | 'top_right' | 'bottom_left' | 'bottom_right';
+	keystrokesCps?: boolean;
 	minimap?: boolean;
+	minimapCorner?: 'top_left' | 'top_right' | 'bottom_left' | 'bottom_right';
+	minimapSize?: 64 | 96 | 128;
+	minimapShape?: 'round' | 'square';
+	minimapZoom?: 0.5 | 1.0 | 2.0 | 4.0;
+	minimapRotate?: boolean;
+	mouseTweaks?: boolean;
+	mouseTweaksWheel?: boolean;
+	sort?: boolean;
+	sortKey?: string;
 	discordPresence?: boolean;
+
+	// Jogabilidade e Sistema
+	mouseSensitivity?: number;
+	invertY?: boolean;
+	autoJump?: boolean;
+	toggleCrouch?: boolean;
+	toggleSprint?: boolean;
+	autoReconnect?: boolean;
+	ownNameTag?: boolean;
+	noAi?: boolean;
+	agentControl?: boolean;
+
+	// Depuração / Modos de Execução
 	creative?: boolean;
 	testTerrain?: boolean;
 	pregen?: boolean;
+}
+
+export interface HorizonModItem {
+	id: string;
+	filename: string;
+	enabled: boolean;
+	title: string;
+	description?: string;
+	size: number;
+	native: boolean;
+	version?: string;
 }
 
 export interface Instance {
@@ -68,6 +153,9 @@ export interface Instance {
 	memory: { minMb: number; maxMb: number };
 	jvmArgs: string;
 	javaPath?: string;
+	javaRenderer?: string;
+	useAngle?: boolean;
+	javaRuntime?: string;
 	rustBinaryPath?: string;
 	horizonOptions?: HorizonOptions;
 	resolution?: { width: number; height: number };
@@ -80,7 +168,7 @@ export interface Instance {
 	playTimeMinutes: number;
 }
 
-export type ServerEngine = 'magma' | 'mohist' | 'arclight' | 'paper' | 'purpur' | 'folia' | 'fabric';
+export type ServerEngine = 'magma' | 'mohist' | 'arclight' | 'paper' | 'purpur' | 'fabric';
 export type ServerStatus = 'stopped' | 'installing' | 'starting' | 'running' | 'stopping' | 'crashed';
 
 export interface LocalServer {
@@ -103,11 +191,12 @@ export interface LocalServer {
 export interface Settings {
 	msClientId: string;
 	javaPath: string;
+	defaultJavaRenderer?: string;
+	defaultUseAngle?: boolean;
 	defaultMemoryMb: number;
 	perfProfile: 'economico' | 'equilibrado' | 'maximo';
 	hideOnLaunch: boolean;
 	showSnapshots: boolean;
-	language?: 'auto' | 'pt' | 'en' | 'es';
 	lastInstanceId?: string;
 	activeAccountId?: string;
 }

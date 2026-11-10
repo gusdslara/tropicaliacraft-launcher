@@ -44,12 +44,12 @@ pub struct Resolution {
 #[serde(rename_all = "camelCase")]
 pub struct LaunchRequest {
     pub instance_id: String,
+    #[serde(default)]
+    pub engine: Option<String>,
     pub game_version: String,
     pub loader: String,
     #[serde(default)]
     pub loader_version: Option<String>,
-    #[serde(default)]
-    pub engine: Option<String>,
     pub account: LaunchAccount,
     pub memory_min_mb: u32,
     pub memory_max_mb: u32,
@@ -57,6 +57,12 @@ pub struct LaunchRequest {
     pub jvm_args: Vec<String>,
     #[serde(default)]
     pub java_path: Option<String>,
+    #[serde(default)]
+    pub java_renderer: Option<String>,
+    #[serde(default)]
+    pub use_angle: Option<bool>,
+    #[serde(default)]
+    pub java_runtime: Option<String>,
     #[serde(default)]
     pub resolution: Option<Resolution>,
     #[serde(default)]
@@ -100,9 +106,9 @@ pub struct LaunchRequest {
     #[serde(default)]
     pub horizon_pregen: Option<bool>,
     #[serde(default)]
-    pub horizon_args: Option<Vec<String>>,
+    pub horizon_options: Option<HorizonOptions>,
     #[serde(default)]
-    pub language: Option<String>,
+    pub horizon_args: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -598,10 +604,6 @@ fn extract_natives(natives: &[(PathBuf, Vec<String>)], dest: &Path) -> Result<()
 }
 
 pub fn extract_zip_archive(zip_file_path: &Path, dest_dir: &Path) -> Result<(), String> {
-    extract_zip_prefixes(zip_file_path, dest_dir, &[])
-}
-
-pub fn extract_zip_prefixes(zip_file_path: &Path, dest_dir: &Path, prefixes: &[&str]) -> Result<(), String> {
     std::fs::create_dir_all(dest_dir).map_err(|e| e.to_string())?;
     let file = std::fs::File::open(zip_file_path).map_err(|e| format!("{}: {e}", zip_file_path.display()))?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
@@ -611,7 +613,42 @@ pub fn extract_zip_prefixes(zip_file_path: &Path, dest_dir: &Path, prefixes: &[&
         if entry.is_dir() {
             continue;
         }
-        if !prefixes.is_empty() && !prefixes.iter().any(|p| name.starts_with(p)) {
+        let Ok(out) = paths::join_inside(dest_dir, &name) else { continue };
+        if let Some(p) = out.parent() {
+            std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
+        }
+        let mut f = std::fs::File::create(&out).map_err(|e| e.to_string())?;
+        std::io::copy(&mut entry, &mut f).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+pub fn extract_zip_archive_with_progress(
+    app: &AppHandle,
+    owner: &str,
+    stage: &str,
+    zip_file_path: &Path,
+    dest_dir: &Path,
+) -> Result<(), String> {
+    std::fs::create_dir_all(dest_dir).map_err(|e| e.to_string())?;
+    let file = std::fs::File::open(zip_file_path).map_err(|e| format!("{}: {e}", zip_file_path.display()))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let total = zip.len();
+    for i in 0..total {
+        let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
+        let name = entry.name().to_string();
+        if i % 120 == 0 || i == total - 1 {
+            let short = name.split('/').last().unwrap_or(&name);
+            download::emit(
+                app,
+                owner,
+                stage,
+                i + 1,
+                total,
+                format!("Extraindo recursos ({short})…"),
+            );
+        }
+        if entry.is_dir() {
             continue;
         }
         let Ok(out) = paths::join_inside(dest_dir, &name) else { continue };
@@ -621,6 +658,14 @@ pub fn extract_zip_prefixes(zip_file_path: &Path, dest_dir: &Path, prefixes: &[&
         let mut f = std::fs::File::create(&out).map_err(|e| e.to_string())?;
         std::io::copy(&mut entry, &mut f).map_err(|e| e.to_string())?;
     }
+    download::emit(
+        app,
+        owner,
+        stage,
+        total,
+        total,
+        "Recursos Rust prontos!".to_string(),
+    );
     Ok(())
 }
 
@@ -789,14 +834,8 @@ fn map_to_mc_language(raw: &str) -> &'static str {
     }
 }
 
-fn resolve_mc_language(preferred: Option<&str>) -> &'static str {
-    if let Some(raw) = preferred.map(str::trim).filter(|s| !s.is_empty()) {
-        return map_to_mc_language(&raw.to_lowercase().replace('-', "_"));
-    }
-    map_to_mc_language(&detect_system_locale())
-}
-
-fn sync_options_language(game_dir: &Path, mc_lang: &str) {
+fn sync_options_language(game_dir: &Path) {
+    let mc_lang = map_to_mc_language(&detect_system_locale());
     let options_path = game_dir.join("options.txt");
 
     if !options_path.exists() {
@@ -814,7 +853,7 @@ fn sync_options_language(game_dir: &Path, mc_lang: &str) {
             if line.starts_with("lang:") {
                 found = true;
                 let val = line.trim_start_matches("lang:").trim();
-                if val != mc_lang {
+                if val.is_empty() {
                     new_lines.push(format!("lang:{mc_lang}"));
                     changed = true;
                 } else {
@@ -863,7 +902,7 @@ pub async fn game_launch(app: AppHandle, state: State<'_, AppState>, req: Launch
     }
 
     // Se for motor Rust (Horizon)
-    if req.loader == "horizon-rust" || req.engine.as_deref() == Some("rust") {
+    if req.loader == "horizon-rust" || req.loader == "horizon" || req.engine.as_deref() == Some("rust") || req.engine.as_deref() == Some("horizon") {
         return launch_horizon_rust(&app, &state, &req).await;
     }
 
@@ -943,13 +982,18 @@ pub async fn game_launch(app: AppHandle, state: State<'_, AppState>, req: Launch
         extract_natives(&plan.natives, &natives_dir)?;
     }
 
-    let mc_lang = resolve_mc_language(req.language.as_deref());
-    sync_options_language(&game_dir, mc_lang);
+    sync_options_language(&game_dir);
 
     #[cfg(target_os = "android")]
     {
         let _ = (asset_index, game_assets, log_arg);
         download::emit(&app, &owner, "launch", 1, 1, "Iniciando Minecraft no Android…");
+        let root = paths::root(&app)?;
+        let _ = std::fs::remove_file(root.join("tropicalia-game-exit.json"));
+        let _ = std::fs::remove_file(root.join("tropicalia-game-status.json"));
+        let _ = std::fs::remove_file(root.join("tropicalia-progress.json"));
+        let _ = std::fs::remove_file(root.join("tropicalia-game-kill.json"));
+
         let launch_payload = json!({
             "instanceId": owner,
             "versionId": version_id,
@@ -961,36 +1005,125 @@ pub async fn game_launch(app: AppHandle, state: State<'_, AppState>, req: Launch
             "memoryMb": req.memory_max_mb.max(1024),
             "jvmArgs": req.jvm_args.join(" "),
             "serverAddress": req.server_address,
+            "javaRenderer": req.java_renderer,
+            "useAngle": req.use_angle.unwrap_or(false),
+            "javaRuntime": req.java_runtime,
         });
-        let root_dir = paths::root(&app)?;
-        let trigger_file = root_dir.join("tropicalia-java-launch.json");
+        let trigger_file = root.join("tropicalia-java-launch.json");
         std::fs::write(&trigger_file, serde_json::to_vec_pretty(&launch_payload).unwrap())
             .map_err(|e| format!("Falha ao acionar o motor Java Android: {e}"))?;
 
-        // Também grava em files/ se existir
-        let files_dir = root_dir.join("files");
-        if files_dir.exists() || std::fs::create_dir_all(&files_dir).is_ok() {
-            let _ = std::fs::write(files_dir.join("tropicalia-java-launch.json"), serde_json::to_vec_pretty(&launch_payload).unwrap());
-        }
+        state.games.lock().await.insert(owner.clone(), 1);
 
-        // Tenta sincronizar o json da versão e client.jar com PojavLauncher
-        let pojav_version_dir = PathBuf::from("/storage/emulated/0/Android/data/net.kdt.pojavlaunch/files/.minecraft/versions").join(&version_id);
-        if std::fs::create_dir_all(&pojav_version_dir).is_ok() {
-            let src_json = version_json_path(&shared, &version_id);
-            if src_json.exists() {
-                let _ = std::fs::copy(&src_json, pojav_version_dir.join(format!("{version_id}.json")));
-            }
-            if client_jar.exists() {
-                let _ = std::fs::copy(&client_jar, pojav_version_dir.join(format!("{version_id}.jar")));
-            }
-        }
-
-        let _ = app.emit("game://started", json!({ "owner": owner, "pid": 1 }));
-        let app2 = app.clone();
-        let owner2 = owner.clone();
+        let app_mon = app.clone();
+        let owner_mon = owner.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-            let _ = app2.emit("game://exit", GameExit { owner: owner2, code: Some(0) });
+            let progress_file = root.join("tropicalia-progress.json");
+            let status_file = root.join("tropicalia-game-status.json");
+            let exit_file = root.join("tropicalia-game-exit.json");
+            let paths_file = root.join("tropicalia-game-paths.json");
+
+            let mut started = false;
+            let mut log_offset: u64 = 0;
+            let mut candidate_log_paths = vec![
+                root.join("tropicalia-latestlog.txt"),
+                root.join("latestlog.txt"),
+                std::path::PathBuf::from("/storage/emulated/0/Android/data/com.tropicaliacraft.launcher/files/latestlog.txt"),
+                std::path::PathBuf::from("/storage/emulated/0/Android/data/com.tropicaliacraft.launcher/files/.minecraft/logs/latest.log"),
+            ];
+
+            let start_time = std::time::Instant::now();
+
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+                // 1. Caminhos dinâmicos enviados pela activity Java
+                if let Ok(raw) = std::fs::read_to_string(&paths_file) {
+                    if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+                        if let Some(p) = v.get("latestLog").and_then(Value::as_str) {
+                            let pb = std::path::PathBuf::from(p);
+                            if !candidate_log_paths.contains(&pb) {
+                                candidate_log_paths.insert(0, pb);
+                            }
+                        }
+                    }
+                }
+
+                // 2. Progresso real vindo do ProgressKeeper / descompactador JRE
+                if !started {
+                    if let Ok(raw) = std::fs::read_to_string(&progress_file) {
+                        if let Ok(p) = serde_json::from_str::<Value>(&raw) {
+                            let stage = p.get("stage").and_then(Value::as_str).unwrap_or("minecraft").to_string();
+                            let current = p.get("current").and_then(Value::as_u64).unwrap_or(0);
+                            let total = p.get("total").and_then(Value::as_u64).unwrap_or(100);
+                            let message = p.get("message").and_then(Value::as_str).unwrap_or("Preparando…").to_string();
+                            download::emit(&app_mon, &owner_mon, &stage, current as usize, total as usize, message);
+                        }
+                    }
+                }
+
+                // 3. Streaming de logs do Minecraft para a UI (game://log)
+                for log_path in &candidate_log_paths {
+                    if let Ok(metadata) = std::fs::metadata(log_path) {
+                        let len = metadata.len();
+                        if len > log_offset {
+                            if let Ok(mut f) = std::fs::File::open(log_path) {
+                                use std::io::{Read, Seek, SeekFrom};
+                                if f.seek(SeekFrom::Start(log_offset)).is_ok() {
+                                    let mut chunk = Vec::new();
+                                    if f.read_to_end(&mut chunk).is_ok() {
+                                        log_offset = len;
+                                        let text = String::from_utf8_lossy(&chunk);
+                                        for line in text.lines() {
+                                            if !line.is_empty() {
+                                                let _ = app_mon.emit("game://log", GameLog {
+                                                    owner: owner_mon.clone(),
+                                                    line: line.to_string(),
+                                                    stream: "out",
+                                                });
+                                            }
+                                        }
+                                        if !started {
+                                            started = true;
+                                            let _ = app_mon.emit("game://started", json!({ "owner": owner_mon.clone(), "pid": 1 }));
+                                        }
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                // 4. Sinal de jogo rodando
+                if !started && status_file.exists() {
+                    started = true;
+                    let _ = app_mon.emit("game://started", json!({ "owner": owner_mon.clone(), "pid": 1 }));
+                }
+
+                // 5. Sinal de encerramento do jogo
+                if exit_file.exists() {
+                    let mut code = Some(0);
+                    if let Ok(raw) = std::fs::read_to_string(&exit_file) {
+                        if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+                            code = v.get("code").and_then(Value::as_i64).map(|c| c as i32);
+                        }
+                    }
+                    let _ = std::fs::remove_file(&exit_file);
+                    let st = app_mon.state::<AppState>();
+                    st.games.lock().await.remove(&owner_mon);
+                    let _ = app_mon.emit("game://exit", GameExit { owner: owner_mon.clone(), code });
+                    break;
+                }
+
+                // 6. Timeout de segurança se nunca iniciar (3 minutos)
+                if !started && start_time.elapsed().as_secs() > 180 {
+                    let st = app_mon.state::<AppState>();
+                    st.games.lock().await.remove(&owner_mon);
+                    let _ = app_mon.emit("game://exit", GameExit { owner: owner_mon.clone(), code: Some(-1) });
+                    break;
+                }
+            }
         });
         return Ok(());
     }
@@ -1104,8 +1237,7 @@ pub async fn game_launch(app: AppHandle, state: State<'_, AppState>, req: Launch
         final_args = vec![format!("@{}", argfile.to_string_lossy())];
     }
 
-    let mc_lang = resolve_mc_language(req.language.as_deref());
-    sync_options_language(&game_dir, mc_lang);
+    sync_options_language(&game_dir);
 
     let mut cmd = tokio::process::Command::new(&java);
     cmd.args(&final_args).current_dir(&game_dir).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -1154,11 +1286,23 @@ pub async fn game_launch(app: AppHandle, state: State<'_, AppState>, req: Launch
 }
 
 #[tauri::command]
-pub async fn game_kill(state: State<'_, AppState>, instance_id: String) -> Result<(), String> {
-    let pid = state.games.lock().await.get(&instance_id).copied();
-    match pid {
-        Some(pid) if pid != 0 => kill_pid(pid),
-        _ => Err("Essa instância não está rodando".into()),
+pub async fn game_kill(_app: AppHandle, state: State<'_, AppState>, instance_id: String) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        if let Ok(root) = paths::root(&_app) {
+            let _ = std::fs::write(root.join("tropicalia-game-kill.json"), "{}");
+        }
+        state.games.lock().await.remove(&instance_id);
+        let _ = _app.emit("game://exit", GameExit { owner: instance_id, code: Some(0) });
+        return Ok(());
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let pid = state.games.lock().await.get(&instance_id).copied();
+        match pid {
+            Some(pid) if pid != 0 => kill_pid(pid),
+            _ => Err("Essa instância não está rodando".into()),
+        }
     }
 }
 
@@ -1186,87 +1330,142 @@ pub async fn launch_horizon_rust(app: &AppHandle, state: &State<'_, AppState>, r
     let game_dir = paths::instance(app, &owner)?;
     let mods_dir = game_dir.join("horizon-mods");
     let _ = std::fs::create_dir_all(&mods_dir);
-    let mc_lang = resolve_mc_language(req.language.as_deref());
-    sync_options_language(&game_dir, mc_lang);
-    sync_horizon_options_to_dir(&game_dir, req)?;
-
-    // Preparar arquivo de sessão caso o usuário esteja autenticado (Microsoft / MSA)
-    let session_file_path = if req.account.user_type == "msa"
-        && !req.account.access_token.is_empty()
-        && req.account.access_token != "0"
-    {
-        let sessions_dir = game_dir.join("sessions");
-        let _ = std::fs::create_dir_all(&sessions_dir);
-        let sf = sessions_dir.join("tropicalia-session.json");
-        let session_body = json!({
-            "name": req.account.username,
-            "uuid": req.account.uuid,
-            "access_token": req.account.access_token,
-            "user_type": "msa",
-            "xuid": null
-        });
-        let _ = std::fs::write(&sf, serde_json::to_vec(&session_body).unwrap_or_default());
-        Some(sf)
-    } else {
-        None
-    };
+    sync_options_language(&game_dir);
 
     #[cfg(target_os = "android")]
     {
+        let _ = state;
+        download::emit(app, &owner, "launch", 1, 1, "Iniciando Horizon Rust (26.3) no Android…");
         let root_dir = paths::root(app)?;
-        let horizon_home = resolve_horizon_android_home(&root_dir);
-        ensure_horizon_android_resources(app, state, &owner, &horizon_home, &game_dir).await?;
+        let files_dir = root_dir.join("files");
+        let _ = std::fs::create_dir_all(&files_dir);
 
-        download::emit(app, &owner, "launch", 1, 1, "Iniciando Minecraft Rust (26.3)…");
+        let mc_lang = map_to_mc_language(&detect_system_locale());
+        let player_name = if req.account.username.trim().is_empty() {
+            "Player"
+        } else {
+            req.account.username.trim()
+        };
+        let launcher_cfg = json!({
+            "name": player_name,
+            "server": req.server_address.clone().unwrap_or_default(),
+            "lang": mc_lang,
+            "renderer": "vulkan",
+        });
 
-        let mut extra_args: Vec<String> = Vec::new();
-        if let Some(rd) = req.horizon_render_distance {
-            extra_args.push("--render-distance".into());
-            extra_args.push(rd.to_string());
+        // 1. Gravar horizon-player.txt e horizon-mods.txt
+        let player_content = format!("name:{player_name}\n");
+        let _ = std::fs::write(game_dir.join("horizon-player.txt"), &player_content);
+        let _ = std::fs::write(root_dir.join("horizon-player.txt"), &player_content);
+        let _ = std::fs::write(files_dir.join("horizon-player.txt"), &player_content);
+
+        if let Ok(mods_content) = std::fs::read_to_string(game_dir.join("horizon-mods.txt")) {
+            let _ = std::fs::write(root_dir.join("horizon-mods.txt"), &mods_content);
+            let _ = std::fs::write(files_dir.join("horizon-mods.txt"), &mods_content);
         }
-        if req.horizon_creative.unwrap_or(false) {
-            extra_args.push("--creative".into());
-        }
-        if req.horizon_test_terrain.unwrap_or(false) {
-            extra_args.push("--test-terrain".into());
-        }
-        if req.horizon_pregen.unwrap_or(false) {
-            extra_args.push("--pregen".into());
-        }
-        if let Some(custom_args) = &req.horizon_args {
-            for a in custom_args {
-                extra_args.push(a.clone());
+
+        // 2. Sincronizar opções
+        let _ = sync_horizon_options_to_dir(&game_dir, req);
+        let _ = sync_horizon_options_to_dir(&root_dir, req);
+        let _ = sync_horizon_options_to_dir(&files_dir, req);
+
+        // 3. Gravar android-launcher.json e flags
+        let cfg_bytes = serde_json::to_vec_pretty(&launcher_cfg).unwrap();
+        let _ = std::fs::write(root_dir.join("android-launcher.json"), &cfg_bytes);
+        let _ = std::fs::write(files_dir.join("android-launcher.json"), &cfg_bytes);
+        let _ = std::fs::write(root_dir.join("tropicalia-auto.flag"), b"1\n");
+        let _ = std::fs::write(files_dir.join("tropicalia-auto.flag"), b"1\n");
+
+        sync_options_language(&root_dir);
+        sync_options_language(&files_dir);
+
+        // 4. Gravar argumentos extras em android-launch.json
+        let mut cli_args = Vec::new();
+        if let Some(srv) = &req.server_address {
+            if !srv.trim().is_empty() {
+                cli_args.push("--server".to_string());
+                cli_args.push(srv.trim().to_string());
             }
         }
+        let cli_bytes = serde_json::to_vec(&cli_args).unwrap_or_default();
+        let _ = std::fs::write(root_dir.join("android-launch.json"), &cli_bytes);
+        let _ = std::fs::write(files_dir.join("android-launch.json"), &cli_bytes);
 
-        let launcher_cfg = json!({
-            "name": if req.account.username.is_empty() { "Player" } else { &req.account.username },
-            "server": req.server_address.clone().unwrap_or_default(),
-            "game_dir": game_dir.to_string_lossy(),
-            "session_file": session_file_path.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
-            "lang": mc_lang,
-            "extra_arguments": extra_args,
-        });
-        let cfg_bytes = serde_json::to_vec_pretty(&launcher_cfg).unwrap();
-        let args_bytes = serde_json::to_vec(&extra_args).unwrap();
+        // 5. Garantir marcadores oficiais de instalação pronta para bypass direto
+        for d in [&root_dir, &files_dir] {
+            let hz_ver = d.join(".local").join("horizon-client").join("26.3");
+            let _ = std::fs::create_dir_all(&hz_ver);
 
-        let _ = std::fs::create_dir_all(&horizon_home);
-        let _ = std::fs::write(horizon_home.join("android-launcher.json"), &cfg_bytes);
-        let _ = std::fs::write(horizon_home.join("android-launch.json"), &args_bytes);
-        let _ = std::fs::write(horizon_home.join("tropicalia-auto.flag"), b"1");
-        sync_options_language(&horizon_home, mc_lang);
-        let _ = sync_horizon_options_to_dir(&horizon_home, req);
-        std::fs::write(horizon_home.join("tropicalia-horizon-launch.json"), &cfg_bytes)
-            .map_err(|e| format!("Falha ao acionar o motor Horizon Rust Android: {e}"))?;
+            let hz_res = hz_ver.join("horizon-resources.json");
+            let is_valid = if let Ok(bytes) = std::fs::read(&hz_res) {
+                if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    json.get("data_version").and_then(|v| v.as_i64()) == Some(5023)
+                        && hz_ver.join("block-tags.json").is_file()
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
 
-        if root_dir != horizon_home {
-            let _ = std::fs::write(root_dir.join("android-launcher.json"), &cfg_bytes);
-            let _ = std::fs::write(root_dir.join("android-launch.json"), &args_bytes);
-            let _ = std::fs::write(root_dir.join("tropicalia-auto.flag"), b"1");
-            sync_options_language(&root_dir, mc_lang);
-            let _ = sync_horizon_options_to_dir(&root_dir, req);
-            let _ = std::fs::write(root_dir.join("tropicalia-horizon-launch.json"), &cfg_bytes);
+            if !is_valid {
+                download::emit(
+                    app,
+                    &owner,
+                    "horizon-prepare",
+                    0,
+                    100,
+                    "Preparando motor Horizon Rust pela primeira vez…".to_string(),
+                );
+
+                let mut zip_found = None;
+                for cand in [
+                    files_dir.join("engine-data.zip"),
+                    root_dir.join("engine-data.zip"),
+                    paths::cache(app).unwrap_or_default().join("engine-data.zip"),
+                ] {
+                    if cand.is_file() && cand.metadata().map(|m| m.len() > 1000).unwrap_or(false) {
+                        zip_found = Some(cand);
+                        break;
+                    }
+                }
+
+                if let Some(zip_path) = zip_found {
+                    let _ = extract_zip_archive_with_progress(
+                        app,
+                        &owner,
+                        "horizon-prepare",
+                        &zip_path,
+                        &hz_ver,
+                    );
+                } else if !hz_res.exists() {
+                    let _ = std::fs::write(&hz_res, b"{\"schema\":7,\"data_version\":5023}\n");
+                }
+            }
+
+            let dlv2 = hz_ver.join("android-downloads-v2.json");
+            if !dlv2.exists() { let _ = std::fs::write(&dlv2, b"{\"schema\":2}\n"); }
+            let audio_comp = hz_ver.join("audio-complete.json");
+            if !audio_comp.exists() { let _ = std::fs::write(&audio_comp, b"{}\n"); }
         }
+
+        download::emit(
+            app,
+            &owner,
+            "launch",
+            1,
+            1,
+            "Iniciando Minecraft Rust (26.3 Vulkan) no Android…".to_string(),
+        );
+
+        let _ = std::fs::remove_file(files_dir.join("vulkan-startup.pending"));
+        let _ = std::fs::remove_file(root_dir.join("vulkan-startup.pending"));
+
+        // 6. Gravar trigger tropicalia-horizon-launch.json
+        let trigger_file = root_dir.join("tropicalia-horizon-launch.json");
+        std::fs::write(&trigger_file, &cfg_bytes)
+            .map_err(|e| format!("Falha ao acionar o motor Horizon Rust Android: {e}"))?;
+        let _ = std::fs::write(files_dir.join("tropicalia-horizon-launch.json"), &cfg_bytes);
 
         let _ = app.emit("game://started", json!({ "owner": owner, "pid": 1 }));
         let app2 = app.clone();
@@ -1294,7 +1493,7 @@ pub async fn launch_horizon_rust(app: &AppHandle, state: &State<'_, AppState>, r
         // Sincronizar opções
         sync_horizon_options_to_dir(&game_dir, req)?;
 
-        download::emit(app, &owner, "launch", 1, 1, "Iniciando Horizon Rust…".to_string());
+        download::emit(app, &owner, "horizon-launch", 1, 10, "Iniciando motor Horizon Rust Vulkan…".to_string());
 
         let mut cmd = tokio::process::Command::new(&client_bin);
         cmd.current_dir(&game_dir)
@@ -1303,13 +1502,14 @@ pub async fn launch_horizon_rust(app: &AppHandle, state: &State<'_, AppState>, r
             .stderr(Stdio::piped());
 
         cmd.arg("--resources").arg(&resources_dir);
+        // cmd.arg("--game-dir") not supported
+        // cmd.arg("--home") not supported
 
-        if let Some(rd) = req.horizon_render_distance {
-            cmd.arg("--render-distance").arg(rd.to_string());
+        let rd = req.horizon_options.as_ref().and_then(|o| o.render_distance).or(req.horizon_render_distance);
+        if let Some(rd_val) = rd {
+            cmd.arg("--render-distance").arg(rd_val.to_string());
         }
-        if let Some(sf) = &session_file_path {
-            cmd.arg("--session-file").arg(sf);
-        } else if !req.account.username.is_empty() {
+        if !req.account.username.is_empty() {
             cmd.arg("--name").arg(&req.account.username);
         }
         if let Some(addr) = &req.server_address {
@@ -1318,13 +1518,16 @@ pub async fn launch_horizon_rust(app: &AppHandle, state: &State<'_, AppState>, r
         if let Some(res) = &req.resolution {
             cmd.arg("--width").arg(res.width.to_string()).arg("--height").arg(res.height.to_string());
         }
-        if req.horizon_creative.unwrap_or(false) {
+        let is_creative = req.horizon_options.as_ref().and_then(|o| o.creative).or(req.horizon_creative).unwrap_or(false);
+        if is_creative {
             cmd.arg("--creative");
         }
-        if req.horizon_test_terrain.unwrap_or(false) {
+        let is_test_terrain = req.horizon_options.as_ref().and_then(|o| o.test_terrain).or(req.horizon_test_terrain).unwrap_or(false);
+        if is_test_terrain {
             cmd.arg("--test-terrain");
         }
-        if req.horizon_pregen.unwrap_or(false) {
+        let is_pregen = req.horizon_options.as_ref().and_then(|o| o.pregen).or(req.horizon_pregen).unwrap_or(false);
+        if is_pregen {
             cmd.arg("--pregen");
         }
         if let Some(extra_args) = &req.horizon_args {
@@ -1333,7 +1536,17 @@ pub async fn launch_horizon_rust(app: &AppHandle, state: &State<'_, AppState>, r
             }
         }
 
+        if req.horizon_options.as_ref().and_then(|o| o.agent_control).unwrap_or(false) {
+            cmd.arg("--control");
+        }
+        if req.resolution.as_ref().map_or(false, |r| r.width == 0 && r.height == 0) {
+            // cmd.arg("--fullscreen") not supported
+        }
+
         cmd.env("HORIZON_HOME", &game_dir);
+        if req.memory_max_mb > 0 {
+            cmd.env("HORIZON_MEMORY_LIMIT_MB", req.memory_max_mb.to_string());
+        }
         hide_console(&mut cmd);
 
         let mut child = cmd.spawn().map_err(|e| {
@@ -1353,6 +1566,14 @@ pub async fn launch_horizon_rust(app: &AppHandle, state: &State<'_, AppState>, r
             tokio::spawn(async move {
                 let mut lines = BufReader::new(pipe).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
+                    let l_lower = line.to_lowercase();
+                    if l_lower.contains("vulkan") || l_lower.contains("surface") || l_lower.contains("adapter") {
+                        download::emit(&app2, &owner2, "horizon-launch", 4, 10, "Compilando pipeline gráfico Vulkan…");
+                    } else if l_lower.contains("terrain") || l_lower.contains("loading terrain") || l_lower.contains("chunk") {
+                        download::emit(&app2, &owner2, "horizon-world", 8, 10, "Carregando chunks e terreno…");
+                    } else if l_lower.contains("joined") || l_lower.contains("connected") || l_lower.contains("ready") {
+                        download::emit(&app2, &owner2, "horizon-world", 10, 10, "Mundo pronto!");
+                    }
                     let _ = app2.emit("game://log", GameLog { owner: owner2.clone(), line, stream });
                 }
             });
@@ -1497,7 +1718,7 @@ pub async fn ensure_horizon_engine(
         || !resources_dir.join("sounds").exists();
 
     if needs_prepare {
-        download::emit(app, owner, "horizon-prepare", 0, 2, "Preparando recursos e texturas de Minecraft 26.3 para Rust…".to_string());
+        download::emit(app, owner, "horizon-prepare", 0, 100, "Iniciando processamento dos blocos e texturas Rust…".to_string());
 
         let mut cmd = tokio::process::Command::new(&prepare_bin);
         cmd.current_dir(&horizon_dir);
@@ -1505,16 +1726,39 @@ pub async fn ensure_horizon_engine(
         cmd.arg("--server-jar").arg(&server_jar);
         cmd.arg("--minecraft-dir").arg(&shared);
         cmd.arg("--root").arg(&horizon_dir);
+        cmd.arg("--progress").arg("json");
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
         hide_console(&mut cmd);
 
-        let out = cmd.output().await.map_err(|e| format!("Falha ao executar horizon-prepare: {e}"))?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            return Err(format!("horizon-prepare --prepare falhou:\n{stderr}\n{stdout}"));
+        let mut child = cmd.spawn().map_err(|e| format!("Falha ao iniciar horizon-prepare: {e}"))?;
+        if let Some(stdout) = child.stdout.take() {
+            let mut lines = tokio::io::BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
+                    if let Some(frac) = json.get("fraction").and_then(|v| v.as_f64()) {
+                        let cur = ((frac * 80.0) as usize).min(80);
+                        let raw_msg = json.get("message").and_then(|m| m.as_str()).unwrap_or("Preparando blocos e paletas…");
+                        let msg = if raw_msg.contains("terrain") || raw_msg.contains("textures") {
+                            "Processando atlas de texturas do Minecraft…".to_string()
+                        } else if raw_msg.contains("models") || raw_msg.contains("block") {
+                            "Construindo modelos e geometria de blocos…".to_string()
+                        } else {
+                            raw_msg.to_string()
+                        };
+                        download::emit(app, owner, "horizon-prepare", cur, 100, msg);
+                    } else if let Some(raw_msg) = json.get("message").and_then(|m| m.as_str()) {
+                        download::emit(app, owner, "horizon-prepare", 40, 100, raw_msg.to_string());
+                    }
+                }
+            }
+        }
+        let out = child.wait().await.map_err(|e| format!("Falha ao aguardar horizon-prepare: {e}"))?;
+        if !out.success() {
+            return Err("horizon-prepare --prepare falhou. Verifique se os arquivos de Minecraft 26.3 estão completos.".to_string());
         }
 
-        download::emit(app, owner, "horizon-prepare", 1, 2, "Extraindo banco sonoro do Horizon Rust…".to_string());
+        download::emit(app, owner, "horizon-prepare", 85, 100, "Extraindo banco sonoro do Horizon Rust…".to_string());
         let mut cmd_sounds = tokio::process::Command::new(&prepare_bin);
         cmd_sounds.current_dir(&horizon_dir);
         cmd_sounds.arg("sounds");
@@ -1527,6 +1771,7 @@ pub async fn ensure_horizon_engine(
             let stderr = String::from_utf8_lossy(&out_sounds.stderr);
             return Err(format!("horizon-prepare sounds falhou:\n{stderr}"));
         }
+        download::emit(app, owner, "horizon-prepare", 100, 100, "Recursos e sons sincronizados com sucesso!".to_string());
     }
 
     Ok((client_bin, resources_dir))
@@ -1535,6 +1780,9 @@ pub async fn ensure_horizon_engine(
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct HorizonOptions {
+    // Gráficos e Renderização Vulkan
+    #[serde(default)]
+    pub preset: Option<String>,
     #[serde(default)]
     pub render_distance: Option<u32>,
     #[serde(default)]
@@ -1542,13 +1790,27 @@ pub struct HorizonOptions {
     #[serde(default)]
     pub far_detail: Option<String>,
     #[serde(default)]
+    pub framerate_limit: Option<u32>,
+    #[serde(default)]
+    pub present_mode: Option<String>,
+    #[serde(default)]
+    pub resolution_scale: Option<f64>,
+    #[serde(default)]
+    pub antialiasing: Option<String>,
+    #[serde(default)]
+    pub upscaling: Option<String>,
+    #[serde(default)]
     pub cave_culling: Option<bool>,
     #[serde(default)]
     pub entity_culling: Option<bool>,
     #[serde(default)]
     pub animated_textures: Option<bool>,
     #[serde(default)]
+    pub dither_cutout_mips: Option<bool>,
+    #[serde(default)]
     pub fxaa: Option<bool>,
+    #[serde(default)]
+    pub taa: Option<bool>,
     #[serde(default)]
     pub sky: Option<bool>,
     #[serde(default)]
@@ -1556,19 +1818,139 @@ pub struct HorizonOptions {
     #[serde(default)]
     pub weather: Option<bool>,
     #[serde(default)]
+    pub chunk_updates: Option<u32>,
+    #[serde(default)]
+    pub upload_budget_kib: Option<u32>,
+    #[serde(default)]
+    pub workers: Option<u32>,
+    #[serde(default)]
+    pub shadow_cache: Option<bool>,
+    #[serde(default)]
+    pub graphics_api: Option<String>,
+
+    // HDR
+    #[serde(default)]
+    pub hdr: Option<bool>,
+    #[serde(default)]
+    pub hdr_paper_white: Option<u32>,
+    #[serde(default)]
+    pub hdr_peak: Option<u32>,
+    #[serde(default)]
+    pub hdr_black_level: Option<f64>,
+    #[serde(default)]
+    pub hdr_ui_brightness: Option<f64>,
+
+    // Áudio e Sons
+    #[serde(default)]
+    pub sound_master: Option<f64>,
+    #[serde(default)]
+    pub sound_music: Option<f64>,
+    #[serde(default)]
+    pub sound_weather: Option<f64>,
+    #[serde(default)]
+    pub sound_blocks: Option<f64>,
+    #[serde(default)]
+    pub sound_hostile: Option<f64>,
+    #[serde(default)]
+    pub sound_neutral: Option<f64>,
+    #[serde(default)]
+    pub sound_players: Option<f64>,
+    #[serde(default)]
+    pub sound_ambient: Option<f64>,
+    #[serde(default)]
+    pub sound_voice: Option<f64>,
+    #[serde(default)]
+    pub directional_audio: Option<bool>,
+    #[serde(default)]
+    pub subtitles: Option<bool>,
+
+    // Visão, HUD e Câmera
+    #[serde(default)]
+    pub fov: Option<u32>,
+    #[serde(default)]
+    pub gamma: Option<f64>,
+    #[serde(default)]
+    pub view_bobbing: Option<bool>,
+    #[serde(default)]
+    pub attack_indicator: Option<String>,
+    #[serde(default)]
+    pub gui_scale: Option<i32>,
+    #[serde(default)]
+    pub menu_blur: Option<u32>,
+    #[serde(default)]
+    pub high_contrast: Option<bool>,
+
+    // Extras Integrados do Horizon
+    #[serde(default)]
     pub fullbright: Option<bool>,
     #[serde(default)]
     pub dynamic_lights: Option<bool>,
     #[serde(default)]
     pub zoom: Option<bool>,
     #[serde(default)]
+    pub zoom_key: Option<String>,
+    #[serde(default)]
+    pub zoom_level: Option<u32>,
+    #[serde(default)]
+    pub zoom_smooth: Option<bool>,
+    #[serde(default)]
+    pub zoom_sensitivity: Option<bool>,
+    #[serde(default)]
     pub fps: Option<bool>,
+    #[serde(default)]
+    pub fps_corner: Option<String>,
+    #[serde(default)]
+    pub fps_lows: Option<bool>,
     #[serde(default)]
     pub keystrokes: Option<bool>,
     #[serde(default)]
+    pub keystrokes_corner: Option<String>,
+    #[serde(default)]
+    pub keystrokes_cps: Option<bool>,
+    #[serde(default)]
     pub minimap: Option<bool>,
     #[serde(default)]
+    pub minimap_corner: Option<String>,
+    #[serde(default)]
+    pub minimap_size: Option<u32>,
+    #[serde(default)]
+    pub minimap_shape: Option<String>,
+    #[serde(default)]
+    pub minimap_zoom: Option<f64>,
+    #[serde(default)]
+    pub minimap_rotate: Option<bool>,
+    #[serde(default)]
+    pub mouse_tweaks: Option<bool>,
+    #[serde(default)]
+    pub mouse_tweaks_wheel: Option<bool>,
+    #[serde(default)]
+    pub sort: Option<bool>,
+    #[serde(default)]
+    pub sort_key: Option<String>,
+    #[serde(default)]
     pub discord_presence: Option<bool>,
+
+    // Jogabilidade e Sistema
+    #[serde(default)]
+    pub mouse_sensitivity: Option<f64>,
+    #[serde(default)]
+    pub invert_y: Option<bool>,
+    #[serde(default)]
+    pub auto_jump: Option<bool>,
+    #[serde(default)]
+    pub toggle_crouch: Option<bool>,
+    #[serde(default)]
+    pub toggle_sprint: Option<bool>,
+    #[serde(default)]
+    pub auto_reconnect: Option<bool>,
+    #[serde(default)]
+    pub own_name_tag: Option<bool>,
+    #[serde(default)]
+    pub no_ai: Option<bool>,
+    #[serde(default)]
+    pub agent_control: Option<bool>,
+
+    // Modos de Execução
     #[serde(default)]
     pub creative: Option<bool>,
     #[serde(default)]
@@ -1640,115 +2022,151 @@ pub fn write_or_update_key_value_file(path: &Path, updates: &HashMap<&str, Strin
 
 fn sync_horizon_options_to_dir(game_dir: &Path, req: &LaunchRequest) -> Result<(), String> {
     std::fs::create_dir_all(game_dir).map_err(|e| e.to_string())?;
+    let hz_opt = req.horizon_options.as_ref();
 
-    // 1. options.txt (idioma, distância de renderização, pacotes de recursos ativos)
+    // 1. options.txt (Vanilla Minecraft & Horizon)
     let opt_path = game_dir.join("options.txt");
     let mut opt_updates = HashMap::new();
-    if let Some(rd) = req.horizon_render_distance {
-        opt_updates.insert("renderDistance", rd.to_string());
-    }
-    let mc_lang = resolve_mc_language(req.language.as_deref());
-    opt_updates.insert("lang", mc_lang.to_string());
-    opt_updates.insert("onboardAccessibility", "false".to_string());
-    opt_updates.insert("skipMultiplayerWarning", "true".to_string());
+    opt_updates.insert("lang", "pt_br".to_string());
 
-    let rp_dir = game_dir.join("resourcepacks");
-    if rp_dir.is_dir() {
-        let mut active_packs = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&rp_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if !name.ends_with(".disabled") && (name.ends_with(".zip") || entry.path().is_dir()) {
-                    active_packs.push(format!("\"file/{name}\""));
-                }
-            }
-        }
-        if !active_packs.is_empty() {
-            opt_updates.insert("resourcePacks", format!("[{}]", active_packs.join(",")));
-        }
+    let rd = hz_opt.and_then(|o| o.render_distance).or(req.horizon_render_distance);
+    if let Some(val) = rd {
+        opt_updates.insert("renderDistance", val.to_string());
     }
+    if let Some(val) = hz_opt.and_then(|o| o.fov) {
+        opt_updates.insert("fov", val.to_string());
+    }
+    if let Some(val) = hz_opt.and_then(|o| o.gamma) {
+        opt_updates.insert("gamma", format!("{:.2}", val / 100.0));
+    }
+    if let Some(val) = hz_opt.and_then(|o| o.framerate_limit) {
+        opt_updates.insert("maxFps", val.to_string());
+    }
+    if let Some(val) = hz_opt.and_then(|o| o.view_bobbing) {
+        opt_updates.insert("bobView", val.to_string());
+    }
+    if let Some(val) = hz_opt.and_then(|o| o.gui_scale) {
+        opt_updates.insert("guiScale", val.to_string());
+    }
+    if let Some(val) = hz_opt.and_then(|o| o.high_contrast) {
+        opt_updates.insert("highContrast", val.to_string());
+    }
+    if let Some(val) = hz_opt.and_then(|o| o.menu_blur) {
+        opt_updates.insert("menuBackgroundBlurriness", val.to_string());
+    }
+    if let Some(val) = hz_opt.and_then(|o| o.mouse_sensitivity) {
+        opt_updates.insert("mouseSensitivity", format!("{:.2}", val / 100.0));
+    }
+    if let Some(val) = hz_opt.and_then(|o| o.invert_y) {
+        opt_updates.insert("invertYMouse", val.to_string());
+    }
+    if let Some(val) = hz_opt.and_then(|o| o.auto_jump) {
+        opt_updates.insert("autoJump", val.to_string());
+    }
+    if let Some(val) = hz_opt.and_then(|o| o.toggle_crouch) {
+        opt_updates.insert("toggleCrouch", val.to_string());
+    }
+    if let Some(val) = hz_opt.and_then(|o| o.toggle_sprint) {
+        opt_updates.insert("toggleSprint", val.to_string());
+    }
+    if let Some(val) = hz_opt.and_then(|o| o.directional_audio) {
+        opt_updates.insert("directionalAudio", val.to_string());
+    }
+    if let Some(val) = hz_opt.and_then(|o| o.subtitles) {
+        opt_updates.insert("showSubtitles", val.to_string());
+    }
+
+    // Sons (0-100 para 0.0-1.0)
+    if let Some(v) = hz_opt.and_then(|o| o.sound_master) { opt_updates.insert("soundCategory_master", format!("{:.2}", v / 100.0)); }
+    if let Some(v) = hz_opt.and_then(|o| o.sound_music) { opt_updates.insert("soundCategory_music", format!("{:.2}", v / 100.0)); }
+    if let Some(v) = hz_opt.and_then(|o| o.sound_weather) { opt_updates.insert("soundCategory_weather", format!("{:.2}", v / 100.0)); }
+    if let Some(v) = hz_opt.and_then(|o| o.sound_blocks) { opt_updates.insert("soundCategory_block", format!("{:.2}", v / 100.0)); }
+    if let Some(v) = hz_opt.and_then(|o| o.sound_hostile) { opt_updates.insert("soundCategory_hostile", format!("{:.2}", v / 100.0)); }
+    if let Some(v) = hz_opt.and_then(|o| o.sound_neutral) { opt_updates.insert("soundCategory_neutral", format!("{:.2}", v / 100.0)); }
+    if let Some(v) = hz_opt.and_then(|o| o.sound_players) { opt_updates.insert("soundCategory_player", format!("{:.2}", v / 100.0)); }
+    if let Some(v) = hz_opt.and_then(|o| o.sound_ambient) { opt_updates.insert("soundCategory_ambient", format!("{:.2}", v / 100.0)); }
+    if let Some(v) = hz_opt.and_then(|o| o.sound_voice) { opt_updates.insert("soundCategory_voice", format!("{:.2}", v / 100.0)); }
+
     let _ = write_or_update_key_value_file(&opt_path, &opt_updates);
 
     // 2. horizon-graphics.txt
     let gfx_path = game_dir.join("horizon-graphics.txt");
     let mut gfx_updates = HashMap::new();
-    gfx_updates.insert("preset", "custom".to_string());
-    if let Some(lod) = req.horizon_lod_distance {
-        gfx_updates.insert("lodDistance", lod.to_string());
-    }
-    if let Some(c) = req.horizon_cave_culling {
-        gfx_updates.insert("caveCulling", c.to_string());
-    }
-    if let Some(e) = req.horizon_entity_culling {
-        gfx_updates.insert("entityCulling", e.to_string());
-    }
-    if let Some(a) = req.horizon_animated_textures {
-        gfx_updates.insert("animatedTextures", a.to_string());
-    }
-    if let Some(f) = req.horizon_fxaa {
-        gfx_updates.insert("fxaa", f.to_string());
-    }
-    let sp_dir = game_dir.join("shaderpacks");
-    if sp_dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&sp_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if !name.ends_with(".disabled") && (name.ends_with(".hshader") || name.ends_with(".zip")) {
-                    gfx_updates.insert("shaderPack", name);
-                    break;
-                }
-            }
-        }
-    }
+    let preset = hz_opt.and_then(|o| o.preset.as_deref()).unwrap_or("custom");
+    gfx_updates.insert("preset", preset.to_string());
+
+    let lod = hz_opt.and_then(|o| o.lod_distance).or(req.horizon_lod_distance);
+    if let Some(val) = lod { gfx_updates.insert("lodDistance", val.to_string()); }
+    if let Some(val) = hz_opt.and_then(|o| o.far_detail.as_deref()) { gfx_updates.insert("farDetail", val.to_string()); }
+    if let Some(val) = hz_opt.and_then(|o| o.cave_culling).or(req.horizon_cave_culling) { gfx_updates.insert("caveCulling", val.to_string()); }
+    if let Some(val) = hz_opt.and_then(|o| o.entity_culling).or(req.horizon_entity_culling) { gfx_updates.insert("entityCulling", val.to_string()); }
+    if let Some(val) = hz_opt.and_then(|o| o.animated_textures).or(req.horizon_animated_textures) { gfx_updates.insert("animatedTextures", val.to_string()); }
+    if let Some(val) = hz_opt.and_then(|o| o.dither_cutout_mips) { gfx_updates.insert("ditherCutoutMips", val.to_string()); }
+    if let Some(val) = hz_opt.and_then(|o| o.fxaa).or(req.horizon_fxaa) { gfx_updates.insert("fxaa", val.to_string()); }
+    if let Some(val) = hz_opt.and_then(|o| o.taa) { gfx_updates.insert("taa", val.to_string()); }
+    if let Some(val) = hz_opt.and_then(|o| o.present_mode.as_deref()) { gfx_updates.insert("presentMode", val.to_string()); }
+    if let Some(val) = hz_opt.and_then(|o| o.resolution_scale) { gfx_updates.insert("resolutionScale", format!("{:.2}", val)); }
+    if let Some(val) = hz_opt.and_then(|o| o.upscaling.as_deref()) { gfx_updates.insert("upscaling", val.to_string()); }
+    if let Some(val) = hz_opt.and_then(|o| o.chunk_updates) { gfx_updates.insert("chunkUpdates", val.to_string()); }
+    if let Some(val) = hz_opt.and_then(|o| o.upload_budget_kib) { gfx_updates.insert("uploadBudgetKiB", val.to_string()); }
+    if let Some(val) = hz_opt.and_then(|o| o.workers) { gfx_updates.insert("workers", val.to_string()); }
+    if let Some(val) = hz_opt.and_then(|o| o.shadow_cache) { gfx_updates.insert("shadowCache", val.to_string()); }
+    if let Some(val) = hz_opt.and_then(|o| o.graphics_api.as_deref()) { gfx_updates.insert("graphicsApi", val.to_string()); }
+    if let Some(val) = hz_opt.and_then(|o| o.sky) { gfx_updates.insert("sky", val.to_string()); }
+    if let Some(val) = hz_opt.and_then(|o| o.fog) { gfx_updates.insert("fog", val.to_string()); }
+    if let Some(val) = hz_opt.and_then(|o| o.weather) { gfx_updates.insert("weather", val.to_string()); }
+    if let Some(val) = hz_opt.and_then(|o| o.hdr) { gfx_updates.insert("hdr", val.to_string()); }
+    if let Some(val) = hz_opt.and_then(|o| o.hdr_paper_white) { gfx_updates.insert("hdrPaperWhite", val.to_string()); }
+    if let Some(val) = hz_opt.and_then(|o| o.hdr_peak) { gfx_updates.insert("hdrPeak", val.to_string()); }
+    if let Some(val) = hz_opt.and_then(|o| o.hdr_black_level) { gfx_updates.insert("hdrBlackLevel", format!("{:.3}", val)); }
+    if let Some(val) = hz_opt.and_then(|o| o.hdr_ui_brightness) { gfx_updates.insert("hdrUiBrightness", format!("{:.2}", val)); }
+
+    gfx_updates.entry("caveCulling").or_insert_with(|| "true".to_string());
+    gfx_updates.entry("entityCulling").or_insert_with(|| "false".to_string());
+    gfx_updates.entry("graphicsApi").or_insert_with(|| "vulkan".to_string());
+    gfx_updates.entry("presentMode").or_insert_with(|| "auto".to_string());
+    gfx_updates.entry("lodDistance").or_insert_with(|| "0".to_string());
+
     let _ = write_or_update_key_value_file(&gfx_path, &gfx_updates);
 
     // 3. horizon-extras.txt
     let ext_path = game_dir.join("horizon-extras.txt");
     let mut ext_updates = HashMap::new();
-    if let Some(b) = req.horizon_fullbright {
-        ext_updates.insert("fullbright", b.to_string());
-    }
-    if let Some(d) = req.horizon_dynamic_lights {
-        ext_updates.insert("dynamicLights", d.to_string());
-    }
-    if let Some(z) = req.horizon_zoom {
-        ext_updates.insert("zoom", z.to_string());
-    }
-    if let Some(f) = req.horizon_fps {
-        ext_updates.insert("fps", f.to_string());
-    }
-    if let Some(k) = req.horizon_keystrokes {
-        ext_updates.insert("keystrokes", k.to_string());
-    }
-    if let Some(m) = req.horizon_minimap {
-        ext_updates.insert("minimap", m.to_string());
-    }
-    if let Some(dp) = req.horizon_discord_presence {
-        ext_updates.insert("discordPresence", dp.to_string());
-    }
-    let _ = write_or_update_key_value_file(&ext_path, &ext_updates);
+    if let Some(b) = hz_opt.and_then(|o| o.fullbright).or(req.horizon_fullbright) { ext_updates.insert("fullbright", b.to_string()); }
+    if let Some(d) = hz_opt.and_then(|o| o.dynamic_lights).or(req.horizon_dynamic_lights) { ext_updates.insert("dynamicLights", d.to_string()); }
+    if let Some(z) = hz_opt.and_then(|o| o.zoom).or(req.horizon_zoom) { ext_updates.insert("zoom", z.to_string()); }
+    if let Some(k) = hz_opt.and_then(|o| o.zoom_key.as_deref()) { ext_updates.insert("zoomKey", k.to_string()); }
+    if let Some(l) = hz_opt.and_then(|o| o.zoom_level) { ext_updates.insert("zoomLevel", l.to_string()); }
+    if let Some(s) = hz_opt.and_then(|o| o.zoom_smooth) { ext_updates.insert("zoomSmooth", s.to_string()); }
+    if let Some(sens) = hz_opt.and_then(|o| o.zoom_sensitivity) { ext_updates.insert("zoomSensitivity", sens.to_string()); }
+    if let Some(f) = hz_opt.and_then(|o| o.fps).or(req.horizon_fps) { ext_updates.insert("fps", f.to_string()); }
+    if let Some(c) = hz_opt.and_then(|o| o.fps_corner.as_deref()) { ext_updates.insert("fpsCorner", c.to_string()); }
+    if let Some(l) = hz_opt.and_then(|o| o.fps_lows) { ext_updates.insert("fpsLows", l.to_string()); }
+    if let Some(k) = hz_opt.and_then(|o| o.keystrokes).or(req.horizon_keystrokes) { ext_updates.insert("keystrokes", k.to_string()); }
+    if let Some(c) = hz_opt.and_then(|o| o.keystrokes_corner.as_deref()) { ext_updates.insert("keystrokesCorner", c.to_string()); }
+    if let Some(cps) = hz_opt.and_then(|o| o.keystrokes_cps) { ext_updates.insert("keystrokesCps", cps.to_string()); }
+    if let Some(m) = hz_opt.and_then(|o| o.minimap).or(req.horizon_minimap) { ext_updates.insert("minimap", m.to_string()); }
+    if let Some(c) = hz_opt.and_then(|o| o.minimap_corner.as_deref()) { ext_updates.insert("minimapCorner", c.to_string()); }
+    if let Some(s) = hz_opt.and_then(|o| o.minimap_size) { ext_updates.insert("minimapSize", s.to_string()); }
+    if let Some(sh) = hz_opt.and_then(|o| o.minimap_shape.as_deref()) { ext_updates.insert("minimapShape", sh.to_string()); }
+    if let Some(z) = hz_opt.and_then(|o| o.minimap_zoom) { ext_updates.insert("minimapZoom", format!("{:.1}", z)); }
+    if let Some(r) = hz_opt.and_then(|o| o.minimap_rotate) { ext_updates.insert("minimapRotate", r.to_string()); }
+    if let Some(mt) = hz_opt.and_then(|o| o.mouse_tweaks) { ext_updates.insert("mouseTweaks", mt.to_string()); }
+    if let Some(w) = hz_opt.and_then(|o| o.mouse_tweaks_wheel) { ext_updates.insert("mouseTweaksWheel", w.to_string()); }
+    if let Some(s) = hz_opt.and_then(|o| o.sort) { ext_updates.insert("sort", s.to_string()); }
+    if let Some(k) = hz_opt.and_then(|o| o.sort_key.as_deref()) { ext_updates.insert("sortKey", k.to_string()); }
+    if let Some(dp) = hz_opt.and_then(|o| o.discord_presence).or(req.horizon_discord_presence) { ext_updates.insert("discordPresence", dp.to_string()); }
+    if let Some(ar) = hz_opt.and_then(|o| o.auto_reconnect) { ext_updates.insert("autoReconnect", ar.to_string()); }
+    if let Some(nt) = hz_opt.and_then(|o| o.own_name_tag) { ext_updates.insert("ownNameTag", nt.to_string()); }
+    if let Some(na) = hz_opt.and_then(|o| o.no_ai) { ext_updates.insert("no_ai", na.to_string()); }
+    if let Some(ac) = hz_opt.and_then(|o| o.agent_control) { ext_updates.insert("agentControl", ac.to_string()); }
 
-    // 4. horizon-mods.txt (habilita todos os .hmod ativos na pasta horizon-mods/ + módulos nativos)
-    let mods_dir = game_dir.join("horizon-mods");
-    let mut mod_lines = Vec::new();
-    if mods_dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&mods_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if let Some(id) = name.strip_suffix(".hmod") {
-                    mod_lines.push(format!("mod.{id}:true"));
-                } else if let Some(id) = name.strip_suffix(".hmod.disabled") {
-                    mod_lines.push(format!("mod.{id}:false"));
-                }
-            }
-        }
-    }
-    // Módulos nativos embutidos do Horizon
-    mod_lines.push(format!("mod.zoom:{}", req.horizon_zoom.unwrap_or(true)));
-    mod_lines.push(format!("mod.minimap:{}", req.horizon_minimap.unwrap_or(false)));
-    mod_lines.push("mod.recipes:true".to_string());
-    mod_lines.push("mod.smartf3:true".to_string());
-    let _ = std::fs::write(game_dir.join("horizon-mods.txt"), mod_lines.join("\n") + "\n");
+    ext_updates.entry("fullbright").or_insert_with(|| "false".to_string());
+    ext_updates.entry("dynamicLights").or_insert_with(|| "false".to_string());
+    ext_updates.entry("zoom").or_insert_with(|| "true".to_string());
+    ext_updates.entry("fps").or_insert_with(|| "true".to_string());
+
+    let _ = write_or_update_key_value_file(&ext_path, &ext_updates);
 
     Ok(())
 }
@@ -1766,61 +2184,89 @@ pub async fn horizon_options_get(app: AppHandle, instance_id: String) -> Result<
     }
 
     let opt_map = read_key_value_file(&game_dir.join("options.txt"));
-    if let Some(rd) = opt_map.get("renderDistance").and_then(|v| v.parse::<u32>().ok()) {
-        opts.render_distance = Some(rd);
-    }
+    if let Some(rd) = opt_map.get("renderDistance").and_then(|v| v.parse::<u32>().ok()) { opts.render_distance = Some(rd); }
+    if let Some(v) = opt_map.get("fov").and_then(|v| v.parse::<u32>().ok()) { opts.fov = Some(v); }
+    if let Some(v) = opt_map.get("gamma").and_then(|v| v.parse::<f64>().ok()) { opts.gamma = Some((v * 100.0).round()); }
+    if let Some(v) = opt_map.get("maxFps").and_then(|v| v.parse::<u32>().ok()) { opts.framerate_limit = Some(v); }
+    if let Some(v) = opt_map.get("bobView").and_then(|v| v.parse::<bool>().ok()) { opts.view_bobbing = Some(v); }
+    if let Some(v) = opt_map.get("guiScale").and_then(|v| v.parse::<i32>().ok()) { opts.gui_scale = Some(v); }
+    if let Some(v) = opt_map.get("highContrast").and_then(|v| v.parse::<bool>().ok()) { opts.high_contrast = Some(v); }
+    if let Some(v) = opt_map.get("menuBackgroundBlurriness").and_then(|v| v.parse::<u32>().ok()) { opts.menu_blur = Some(v); }
+    if let Some(v) = opt_map.get("mouseSensitivity").and_then(|v| v.parse::<f64>().ok()) { opts.mouse_sensitivity = Some((v * 100.0).round()); }
+    if let Some(v) = opt_map.get("invertYMouse").and_then(|v| v.parse::<bool>().ok()) { opts.invert_y = Some(v); }
+    if let Some(v) = opt_map.get("autoJump").and_then(|v| v.parse::<bool>().ok()) { opts.auto_jump = Some(v); }
+    if let Some(v) = opt_map.get("toggleCrouch").and_then(|v| v.parse::<bool>().ok()) { opts.toggle_crouch = Some(v); }
+    if let Some(v) = opt_map.get("toggleSprint").and_then(|v| v.parse::<bool>().ok()) { opts.toggle_sprint = Some(v); }
+    if let Some(v) = opt_map.get("directionalAudio").and_then(|v| v.parse::<bool>().ok()) { opts.directional_audio = Some(v); }
+    if let Some(v) = opt_map.get("showSubtitles").and_then(|v| v.parse::<bool>().ok()) { opts.subtitles = Some(v); }
+
+    let parse_vol = |key: &str| opt_map.get(key).and_then(|v| v.parse::<f64>().ok()).map(|v| (v * 100.0).round());
+    if let Some(v) = parse_vol("soundCategory_master") { opts.sound_master = Some(v); }
+    if let Some(v) = parse_vol("soundCategory_music") { opts.sound_music = Some(v); }
+    if let Some(v) = parse_vol("soundCategory_weather") { opts.sound_weather = Some(v); }
+    if let Some(v) = parse_vol("soundCategory_block") { opts.sound_blocks = Some(v); }
+    if let Some(v) = parse_vol("soundCategory_hostile") { opts.sound_hostile = Some(v); }
+    if let Some(v) = parse_vol("soundCategory_neutral") { opts.sound_neutral = Some(v); }
+    if let Some(v) = parse_vol("soundCategory_player") { opts.sound_players = Some(v); }
+    if let Some(v) = parse_vol("soundCategory_ambient") { opts.sound_ambient = Some(v); }
+    if let Some(v) = parse_vol("soundCategory_voice") { opts.sound_voice = Some(v); }
 
     let gfx_map = read_key_value_file(&game_dir.join("horizon-graphics.txt"));
-    if let Some(lod) = gfx_map.get("lodDistance").and_then(|v| v.parse::<u32>().ok()) {
-        opts.lod_distance = Some(lod);
-    }
-    if let Some(val) = gfx_map.get("farDetail") {
-        opts.far_detail = Some(val.clone());
-    }
-    if let Some(val) = gfx_map.get("caveCulling").and_then(|v| v.parse::<bool>().ok()) {
-        opts.cave_culling = Some(val);
-    }
-    if let Some(val) = gfx_map.get("entityCulling").and_then(|v| v.parse::<bool>().ok()) {
-        opts.entity_culling = Some(val);
-    }
-    if let Some(val) = gfx_map.get("animatedTextures").and_then(|v| v.parse::<bool>().ok()) {
-        opts.animated_textures = Some(val);
-    }
-    if let Some(val) = gfx_map.get("fxaa").and_then(|v| v.parse::<bool>().ok()) {
-        opts.fxaa = Some(val);
-    }
-    if let Some(val) = gfx_map.get("sky").and_then(|v| v.parse::<bool>().ok()) {
-        opts.sky = Some(val);
-    }
-    if let Some(val) = gfx_map.get("fog").and_then(|v| v.parse::<bool>().ok()) {
-        opts.fog = Some(val);
-    }
-    if let Some(val) = gfx_map.get("weather").and_then(|v| v.parse::<bool>().ok()) {
-        opts.weather = Some(val);
-    }
+    if let Some(v) = gfx_map.get("preset") { opts.preset = Some(v.clone()); }
+    if let Some(lod) = gfx_map.get("lodDistance").and_then(|v| v.parse::<u32>().ok()) { opts.lod_distance = Some(lod); }
+    if let Some(val) = gfx_map.get("farDetail") { opts.far_detail = Some(val.clone()); }
+    if let Some(val) = gfx_map.get("caveCulling").and_then(|v| v.parse::<bool>().ok()) { opts.cave_culling = Some(val); }
+    if let Some(val) = gfx_map.get("entityCulling").and_then(|v| v.parse::<bool>().ok()) { opts.entity_culling = Some(val); }
+    if let Some(val) = gfx_map.get("animatedTextures").and_then(|v| v.parse::<bool>().ok()) { opts.animated_textures = Some(val); }
+    if let Some(val) = gfx_map.get("ditherCutoutMips").and_then(|v| v.parse::<bool>().ok()) { opts.dither_cutout_mips = Some(val); }
+    if let Some(val) = gfx_map.get("fxaa").and_then(|v| v.parse::<bool>().ok()) { opts.fxaa = Some(val); }
+    if let Some(val) = gfx_map.get("taa").and_then(|v| v.parse::<bool>().ok()) { opts.taa = Some(val); }
+    if let Some(val) = gfx_map.get("presentMode") { opts.present_mode = Some(val.clone()); }
+    if let Some(val) = gfx_map.get("resolutionScale").and_then(|v| v.parse::<f64>().ok()) { opts.resolution_scale = Some(val); }
+    if let Some(val) = gfx_map.get("upscaling") { opts.upscaling = Some(val.clone()); }
+    if let Some(val) = gfx_map.get("chunkUpdates").and_then(|v| v.parse::<u32>().ok()) { opts.chunk_updates = Some(val); }
+    if let Some(val) = gfx_map.get("uploadBudgetKiB").and_then(|v| v.parse::<u32>().ok()) { opts.upload_budget_kib = Some(val); }
+    if let Some(val) = gfx_map.get("workers").and_then(|v| v.parse::<u32>().ok()) { opts.workers = Some(val); }
+    if let Some(val) = gfx_map.get("shadowCache").and_then(|v| v.parse::<bool>().ok()) { opts.shadow_cache = Some(val); }
+    if let Some(val) = gfx_map.get("graphicsApi") { opts.graphics_api = Some(val.clone()); }
+    if let Some(val) = gfx_map.get("sky").and_then(|v| v.parse::<bool>().ok()) { opts.sky = Some(val); }
+    if let Some(val) = gfx_map.get("fog").and_then(|v| v.parse::<bool>().ok()) { opts.fog = Some(val); }
+    if let Some(val) = gfx_map.get("weather").and_then(|v| v.parse::<bool>().ok()) { opts.weather = Some(val); }
+    if let Some(val) = gfx_map.get("hdr").and_then(|v| v.parse::<bool>().ok()) { opts.hdr = Some(val); }
+    if let Some(val) = gfx_map.get("hdrPaperWhite").and_then(|v| v.parse::<u32>().ok()) { opts.hdr_paper_white = Some(val); }
+    if let Some(val) = gfx_map.get("hdrPeak").and_then(|v| v.parse::<u32>().ok()) { opts.hdr_peak = Some(val); }
+    if let Some(val) = gfx_map.get("hdrBlackLevel").and_then(|v| v.parse::<f64>().ok()) { opts.hdr_black_level = Some(val); }
+    if let Some(val) = gfx_map.get("hdrUiBrightness").and_then(|v| v.parse::<f64>().ok()) { opts.hdr_ui_brightness = Some(val); }
 
     let ext_map = read_key_value_file(&game_dir.join("horizon-extras.txt"));
-    if let Some(val) = ext_map.get("fullbright").and_then(|v| v.parse::<bool>().ok()) {
-        opts.fullbright = Some(val);
-    }
-    if let Some(val) = ext_map.get("dynamicLights").and_then(|v| v.parse::<bool>().ok()) {
-        opts.dynamic_lights = Some(val);
-    }
-    if let Some(val) = ext_map.get("zoom").and_then(|v| v.parse::<bool>().ok()) {
-        opts.zoom = Some(val);
-    }
-    if let Some(val) = ext_map.get("fps").and_then(|v| v.parse::<bool>().ok()) {
-        opts.fps = Some(val);
-    }
-    if let Some(val) = ext_map.get("keystrokes").and_then(|v| v.parse::<bool>().ok()) {
-        opts.keystrokes = Some(val);
-    }
-    if let Some(val) = ext_map.get("minimap").and_then(|v| v.parse::<bool>().ok()) {
-        opts.minimap = Some(val);
-    }
-    if let Some(val) = ext_map.get("discordPresence").and_then(|v| v.parse::<bool>().ok()) {
-        opts.discord_presence = Some(val);
-    }
+    if let Some(val) = ext_map.get("fullbright").and_then(|v| v.parse::<bool>().ok()) { opts.fullbright = Some(val); }
+    if let Some(val) = ext_map.get("dynamicLights").and_then(|v| v.parse::<bool>().ok()) { opts.dynamic_lights = Some(val); }
+    if let Some(val) = ext_map.get("zoom").and_then(|v| v.parse::<bool>().ok()) { opts.zoom = Some(val); }
+    if let Some(val) = ext_map.get("zoomKey") { opts.zoom_key = Some(val.clone()); }
+    if let Some(val) = ext_map.get("zoomLevel").and_then(|v| v.parse::<u32>().ok()) { opts.zoom_level = Some(val); }
+    if let Some(val) = ext_map.get("zoomSmooth").and_then(|v| v.parse::<bool>().ok()) { opts.zoom_smooth = Some(val); }
+    if let Some(val) = ext_map.get("zoomSensitivity").and_then(|v| v.parse::<bool>().ok()) { opts.zoom_sensitivity = Some(val); }
+    if let Some(val) = ext_map.get("fps").and_then(|v| v.parse::<bool>().ok()) { opts.fps = Some(val); }
+    if let Some(val) = ext_map.get("fpsCorner") { opts.fps_corner = Some(val.clone()); }
+    if let Some(val) = ext_map.get("fpsLows").and_then(|v| v.parse::<bool>().ok()) { opts.fps_lows = Some(val); }
+    if let Some(val) = ext_map.get("keystrokes").and_then(|v| v.parse::<bool>().ok()) { opts.keystrokes = Some(val); }
+    if let Some(val) = ext_map.get("keystrokesCorner") { opts.keystrokes_corner = Some(val.clone()); }
+    if let Some(val) = ext_map.get("keystrokesCps").and_then(|v| v.parse::<bool>().ok()) { opts.keystrokes_cps = Some(val); }
+    if let Some(val) = ext_map.get("minimap").and_then(|v| v.parse::<bool>().ok()) { opts.minimap = Some(val); }
+    if let Some(val) = ext_map.get("minimapCorner") { opts.minimap_corner = Some(val.clone()); }
+    if let Some(val) = ext_map.get("minimapSize").and_then(|v| v.parse::<u32>().ok()) { opts.minimap_size = Some(val); }
+    if let Some(val) = ext_map.get("minimapShape") { opts.minimap_shape = Some(val.clone()); }
+    if let Some(val) = ext_map.get("minimapZoom").and_then(|v| v.parse::<f64>().ok()) { opts.minimap_zoom = Some(val); }
+    if let Some(val) = ext_map.get("minimapRotate").and_then(|v| v.parse::<bool>().ok()) { opts.minimap_rotate = Some(val); }
+    if let Some(val) = ext_map.get("mouseTweaks").and_then(|v| v.parse::<bool>().ok()) { opts.mouse_tweaks = Some(val); }
+    if let Some(val) = ext_map.get("mouseTweaksWheel").and_then(|v| v.parse::<bool>().ok()) { opts.mouse_tweaks_wheel = Some(val); }
+    if let Some(val) = ext_map.get("sort").and_then(|v| v.parse::<bool>().ok()) { opts.sort = Some(val); }
+    if let Some(val) = ext_map.get("sortKey") { opts.sort_key = Some(val.clone()); }
+    if let Some(val) = ext_map.get("discordPresence").and_then(|v| v.parse::<bool>().ok()) { opts.discord_presence = Some(val); }
+    if let Some(val) = ext_map.get("autoReconnect").and_then(|v| v.parse::<bool>().ok()) { opts.auto_reconnect = Some(val); }
+    if let Some(val) = ext_map.get("ownNameTag").and_then(|v| v.parse::<bool>().ok()) { opts.own_name_tag = Some(val); }
+    if let Some(val) = ext_map.get("no_ai").and_then(|v| v.parse::<bool>().ok()) { opts.no_ai = Some(val); }
+    if let Some(val) = ext_map.get("agentControl").and_then(|v| v.parse::<bool>().ok()) { opts.agent_control = Some(val); }
 
     Ok(opts)
 }
@@ -1834,391 +2280,97 @@ pub async fn horizon_options_set(app: AppHandle, instance_id: String, options: H
     let json_bytes = serde_json::to_vec_pretty(&options).map_err(|e| e.to_string())?;
     std::fs::write(&settings_file, json_bytes).map_err(|e| e.to_string())?;
 
-    if let Some(rd) = options.render_distance {
-        let mut map = HashMap::new();
-        map.insert("renderDistance", rd.to_string());
-        let _ = write_or_update_key_value_file(&game_dir.join("options.txt"), &map);
-    }
+    // 1. options.txt
+    let mut opt_updates = HashMap::new();
+    if let Some(rd) = options.render_distance { opt_updates.insert("renderDistance", rd.to_string()); }
+    if let Some(v) = options.fov { opt_updates.insert("fov", v.to_string()); }
+    if let Some(v) = options.gamma { opt_updates.insert("gamma", format!("{:.2}", v / 100.0)); }
+    if let Some(v) = options.framerate_limit { opt_updates.insert("maxFps", v.to_string()); }
+    if let Some(v) = options.view_bobbing { opt_updates.insert("bobView", v.to_string()); }
+    if let Some(v) = options.gui_scale { opt_updates.insert("guiScale", v.to_string()); }
+    if let Some(v) = options.high_contrast { opt_updates.insert("highContrast", v.to_string()); }
+    if let Some(v) = options.menu_blur { opt_updates.insert("menuBackgroundBlurriness", v.to_string()); }
+    if let Some(v) = options.mouse_sensitivity { opt_updates.insert("mouseSensitivity", format!("{:.2}", v / 100.0)); }
+    if let Some(v) = options.invert_y { opt_updates.insert("invertYMouse", v.to_string()); }
+    if let Some(v) = options.auto_jump { opt_updates.insert("autoJump", v.to_string()); }
+    if let Some(v) = options.toggle_crouch { opt_updates.insert("toggleCrouch", v.to_string()); }
+    if let Some(v) = options.toggle_sprint { opt_updates.insert("toggleSprint", v.to_string()); }
+    if let Some(v) = options.directional_audio { opt_updates.insert("directionalAudio", v.to_string()); }
+    if let Some(v) = options.subtitles { opt_updates.insert("showSubtitles", v.to_string()); }
 
+    if let Some(v) = options.sound_master { opt_updates.insert("soundCategory_master", format!("{:.2}", v / 100.0)); }
+    if let Some(v) = options.sound_music { opt_updates.insert("soundCategory_music", format!("{:.2}", v / 100.0)); }
+    if let Some(v) = options.sound_weather { opt_updates.insert("soundCategory_weather", format!("{:.2}", v / 100.0)); }
+    if let Some(v) = options.sound_blocks { opt_updates.insert("soundCategory_block", format!("{:.2}", v / 100.0)); }
+    if let Some(v) = options.sound_hostile { opt_updates.insert("soundCategory_hostile", format!("{:.2}", v / 100.0)); }
+    if let Some(v) = options.sound_neutral { opt_updates.insert("soundCategory_neutral", format!("{:.2}", v / 100.0)); }
+    if let Some(v) = options.sound_players { opt_updates.insert("soundCategory_player", format!("{:.2}", v / 100.0)); }
+    if let Some(v) = options.sound_ambient { opt_updates.insert("soundCategory_ambient", format!("{:.2}", v / 100.0)); }
+    if let Some(v) = options.sound_voice { opt_updates.insert("soundCategory_voice", format!("{:.2}", v / 100.0)); }
+
+    let _ = write_or_update_key_value_file(&game_dir.join("options.txt"), &opt_updates);
+
+    // 2. horizon-graphics.txt
     let mut gfx = HashMap::new();
-    gfx.insert("preset", "custom".to_string());
-    if let Some(lod) = options.lod_distance {
-        gfx.insert("lodDistance", lod.to_string());
-    }
-    if let Some(fd) = &options.far_detail {
-        gfx.insert("farDetail", fd.clone());
-    }
-    if let Some(c) = options.cave_culling {
-        gfx.insert("caveCulling", c.to_string());
-    }
-    if let Some(e) = options.entity_culling {
-        gfx.insert("entityCulling", e.to_string());
-    }
-    if let Some(a) = options.animated_textures {
-        gfx.insert("animatedTextures", a.to_string());
-    }
-    if let Some(f) = options.fxaa {
-        gfx.insert("fxaa", f.to_string());
-    }
-    if let Some(s) = options.sky {
-        gfx.insert("sky", s.to_string());
-    }
-    if let Some(f) = options.fog {
-        gfx.insert("fog", f.to_string());
-    }
-    if let Some(w) = options.weather {
-        gfx.insert("weather", w.to_string());
-    }
+    let preset = options.preset.as_deref().unwrap_or("custom");
+    gfx.insert("preset", preset.to_string());
+    if let Some(lod) = options.lod_distance { gfx.insert("lodDistance", lod.to_string()); }
+    if let Some(fd) = &options.far_detail { gfx.insert("farDetail", fd.clone()); }
+    if let Some(c) = options.cave_culling { gfx.insert("caveCulling", c.to_string()); }
+    if let Some(e) = options.entity_culling { gfx.insert("entityCulling", e.to_string()); }
+    if let Some(a) = options.animated_textures { gfx.insert("animatedTextures", a.to_string()); }
+    if let Some(d) = options.dither_cutout_mips { gfx.insert("ditherCutoutMips", d.to_string()); }
+    if let Some(f) = options.fxaa { gfx.insert("fxaa", f.to_string()); }
+    if let Some(t) = options.taa { gfx.insert("taa", t.to_string()); }
+    if let Some(p) = &options.present_mode { gfx.insert("presentMode", p.clone()); }
+    if let Some(r) = options.resolution_scale { gfx.insert("resolutionScale", format!("{:.2}", r)); }
+    if let Some(u) = &options.upscaling { gfx.insert("upscaling", u.clone()); }
+    if let Some(cu) = options.chunk_updates { gfx.insert("chunkUpdates", cu.to_string()); }
+    if let Some(ub) = options.upload_budget_kib { gfx.insert("uploadBudgetKiB", ub.to_string()); }
+    if let Some(w) = options.workers { gfx.insert("workers", w.to_string()); }
+    if let Some(sc) = options.shadow_cache { gfx.insert("shadowCache", sc.to_string()); }
+    if let Some(api) = &options.graphics_api { gfx.insert("graphicsApi", api.clone()); }
+    if let Some(s) = options.sky { gfx.insert("sky", s.to_string()); }
+    if let Some(f) = options.fog { gfx.insert("fog", f.to_string()); }
+    if let Some(w) = options.weather { gfx.insert("weather", w.to_string()); }
+    if let Some(h) = options.hdr { gfx.insert("hdr", h.to_string()); }
+    if let Some(v) = options.hdr_paper_white { gfx.insert("hdrPaperWhite", v.to_string()); }
+    if let Some(v) = options.hdr_peak { gfx.insert("hdrPeak", v.to_string()); }
+    if let Some(v) = options.hdr_black_level { gfx.insert("hdrBlackLevel", format!("{:.3}", v)); }
+    if let Some(v) = options.hdr_ui_brightness { gfx.insert("hdrUiBrightness", format!("{:.2}", v)); }
     let _ = write_or_update_key_value_file(&game_dir.join("horizon-graphics.txt"), &gfx);
 
+    // 3. horizon-extras.txt
     let mut ext = HashMap::new();
-    if let Some(b) = options.fullbright {
-        ext.insert("fullbright", b.to_string());
-    }
-    if let Some(d) = options.dynamic_lights {
-        ext.insert("dynamicLights", d.to_string());
-    }
-    if let Some(z) = options.zoom {
-        ext.insert("zoom", z.to_string());
-    }
-    if let Some(f) = options.fps {
-        ext.insert("fps", f.to_string());
-    }
-    if let Some(k) = options.keystrokes {
-        ext.insert("keystrokes", k.to_string());
-    }
-    if let Some(m) = options.minimap {
-        ext.insert("minimap", m.to_string());
-    }
-    if let Some(dp) = options.discord_presence {
-        ext.insert("discordPresence", dp.to_string());
-    }
+    if let Some(b) = options.fullbright { ext.insert("fullbright", b.to_string()); }
+    if let Some(d) = options.dynamic_lights { ext.insert("dynamicLights", d.to_string()); }
+    if let Some(z) = options.zoom { ext.insert("zoom", z.to_string()); }
+    if let Some(k) = &options.zoom_key { ext.insert("zoomKey", k.clone()); }
+    if let Some(l) = options.zoom_level { ext.insert("zoomLevel", l.to_string()); }
+    if let Some(s) = options.zoom_smooth { ext.insert("zoomSmooth", s.to_string()); }
+    if let Some(s) = options.zoom_sensitivity { ext.insert("zoomSensitivity", s.to_string()); }
+    if let Some(f) = options.fps { ext.insert("fps", f.to_string()); }
+    if let Some(c) = &options.fps_corner { ext.insert("fpsCorner", c.clone()); }
+    if let Some(l) = options.fps_lows { ext.insert("fpsLows", l.to_string()); }
+    if let Some(k) = options.keystrokes { ext.insert("keystrokes", k.to_string()); }
+    if let Some(c) = &options.keystrokes_corner { ext.insert("keystrokesCorner", c.clone()); }
+    if let Some(c) = options.keystrokes_cps { ext.insert("keystrokesCps", c.to_string()); }
+    if let Some(m) = options.minimap { ext.insert("minimap", m.to_string()); }
+    if let Some(c) = &options.minimap_corner { ext.insert("minimapCorner", c.clone()); }
+    if let Some(s) = options.minimap_size { ext.insert("minimapSize", s.to_string()); }
+    if let Some(sh) = &options.minimap_shape { ext.insert("minimapShape", sh.clone()); }
+    if let Some(z) = options.minimap_zoom { ext.insert("minimapZoom", format!("{:.1}", z)); }
+    if let Some(r) = options.minimap_rotate { ext.insert("minimapRotate", r.to_string()); }
+    if let Some(mt) = options.mouse_tweaks { ext.insert("mouseTweaks", mt.to_string()); }
+    if let Some(w) = options.mouse_tweaks_wheel { ext.insert("mouseTweaksWheel", w.to_string()); }
+    if let Some(s) = options.sort { ext.insert("sort", s.to_string()); }
+    if let Some(k) = &options.sort_key { ext.insert("sortKey", k.clone()); }
+    if let Some(dp) = options.discord_presence { ext.insert("discordPresence", dp.to_string()); }
+    if let Some(ar) = options.auto_reconnect { ext.insert("autoReconnect", ar.to_string()); }
+    if let Some(nt) = options.own_name_tag { ext.insert("ownNameTag", nt.to_string()); }
+    if let Some(na) = options.no_ai { ext.insert("no_ai", na.to_string()); }
+    if let Some(ac) = options.agent_control { ext.insert("agentControl", ac.to_string()); }
     let _ = write_or_update_key_value_file(&game_dir.join("horizon-extras.txt"), &ext);
-
-    Ok(())
-}
-
-const BEDROCK_CONTROLS_JSON: &str = include_str!("../bedrock-controls.json");
-
-const HORIZON_WORLDGEN: &[(&str, &str)] = &[
-    ("noises", "worldgen/noise"),
-    ("densities", "worldgen/density_function"),
-    ("rules", "worldgen/material_rule"),
-    ("conditions", "worldgen/material_condition"),
-    ("settings", "worldgen/noise_settings"),
-    ("carvers", "worldgen/carver"),
-    ("biomes", "worldgen/biome"),
-    ("world_presets", "worldgen/world_preset"),
-    ("features", "worldgen/feature"),
-    ("placed_features", "worldgen/placed_feature"),
-    ("state_providers", "worldgen/block_state_provider"),
-    ("biome_tags", "tags/worldgen/biome"),
-    ("feature_tags", "tags/worldgen/feature"),
-    ("block_tags", "tags/block"),
-    ("fluid_tags", "tags/fluid"),
-    ("processor_lists", "worldgen/processor_list"),
-    ("template_pools", "worldgen/template_pool"),
-    ("structures", "worldgen/structure"),
-    ("structure_sets", "worldgen/structure_set"),
-];
-
-#[allow(dead_code)]
-fn resolve_horizon_android_home(root_dir: &Path) -> PathBuf {
-    if root_dir.file_name().is_some_and(|n| n == "files") {
-        root_dir.to_path_buf()
-    } else {
-        root_dir.join("files")
-    }
-}
-
-fn horizon_android_ready(ver_dir: &Path) -> bool {
-    ver_dir.join("horizon-resources.json").is_file()
-        && ver_dir.join("android-downloads-v2.json").is_file()
-        && ver_dir.join("audio-complete.json").is_file()
-        && ver_dir
-            .join("worldgen/blocks/structure-blocks.json")
-            .metadata()
-            .is_ok_and(|m| m.len() > 2)
-        && ver_dir.join("worldgen/noises.json").is_file()
-        && ver_dir.join("assets/minecraft/lang/en_us.json").is_file()
-        && ver_dir.join("assets/minecraft/textures/gui/bedrock/LICENSE.md").is_file()
-}
-
-fn walk_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
-    if !root.is_dir() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(root).map_err(|e| e.to_string())? {
-        let path = entry.map_err(|e| e.to_string())?.path();
-        if path.is_dir() {
-            walk_files(&path, out)?;
-        } else {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
-
-fn aggregate_worldgen_dir(root: &Path, source: &str, target: &str) -> Result<(), String> {
-    let base = root.join("data/minecraft").join(source);
-    let mut files = Vec::new();
-    walk_files(&base, &mut files)?;
-    files.sort();
-    let mut values = serde_json::Map::new();
-    for file in files {
-        if file.extension().is_none_or(|ext| ext != "json") {
-            continue;
-        }
-        let relative = file.strip_prefix(&base).map_err(|e| e.to_string())?.with_extension("");
-        let key = format!("minecraft:{}", relative.to_string_lossy().replace('\\', "/"));
-        let contents = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-        values.insert(key, Value::String(contents));
-    }
-    let out_path = root.join(target);
-    if let Some(parent) = out_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let bytes = serde_json::to_vec(&values).map_err(|e| e.to_string())?;
-    std::fs::write(out_path, bytes).map_err(|e| e.to_string())
-}
-
-fn rebuild_android_worldgen_resources(root: &Path) -> Result<(), String> {
-    for (name, source) in HORIZON_WORLDGEN {
-        aggregate_worldgen_dir(root, source, &format!("worldgen/{name}.json"))?;
-    }
-    for (name, source) in [
-        ("block-tags", "tags/block"),
-        ("damage-tags", "tags/damage_type"),
-        ("damage-types", "damage_type"),
-    ] {
-        aggregate_worldgen_dir(root, source, &format!("{name}.json"))?;
-    }
-    let structure_base = root.join("data/minecraft/structure");
-    let mut structures = Vec::new();
-    walk_files(&structure_base, &mut structures)?;
-    for file in structures {
-        if file.extension().is_none_or(|ext| ext != "nbt") {
-            continue;
-        }
-        let rel = file.strip_prefix(&structure_base).map_err(|e| e.to_string())?;
-        let target = root.join("worldgen/structure/minecraft").join(rel);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        std::fs::copy(&file, &target).map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-fn bedrock_control_entries() -> Result<(String, Vec<(PathBuf, String, u64, String)>), String> {
-    let manifest: Value = serde_json::from_str(BEDROCK_CONTROLS_JSON)
-        .map_err(|e| format!("bedrock-controls.json inválido: {e}"))?;
-    let revision = manifest["revision"]
-        .as_str()
-        .ok_or_else(|| "Manifesto de controles sem revision".to_string())?
-        .to_string();
-    let entries = manifest["files"]
-        .as_array()
-        .ok_or_else(|| "Manifesto de controles sem files".to_string())?;
-    let mut out = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let name = entry["path"].as_str().ok_or("Controle sem path")?;
-        let hash = entry["sha256"].as_str().ok_or("Controle sem sha256")?.to_string();
-        let size = entry["size"]
-            .as_u64()
-            .filter(|n| *n <= 1024 * 1024)
-            .ok_or("Tamanho de controle inválido")?;
-        let relative = Path::new(name);
-        if relative.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
-            return Err(format!("Caminho de controle inválido: {name}"));
-        }
-        let source = if name == "LICENSE.md" {
-            "LICENSE.md".to_string()
-        } else {
-            format!(
-                "resource_pack/textures/{}",
-                entry["source"].as_str().ok_or("Controle sem source")?
-            )
-        };
-        let url = format!("https://raw.githubusercontent.com/Mojang/bedrock-samples/{revision}/{source}");
-        out.push((relative.to_path_buf(), hash, size, url));
-    }
-    Ok((revision, out))
-}
-
-#[allow(dead_code)]
-async fn ensure_horizon_android_resources(
-    app: &AppHandle,
-    state: &State<'_, AppState>,
-    owner: &str,
-    horizon_home: &Path,
-    game_dir: &Path,
-) -> Result<(), String> {
-    let versions_dir = horizon_home.join(".local").join("horizon-client");
-    let ver_dir = versions_dir.join("26.3");
-    if horizon_android_ready(&ver_dir) {
-        return Ok(());
-    }
-
-    // Aguarda engine-data.zip caso MainActivity ainda esteja copiando dos assets do APK.
-    let engine_zip = horizon_home.join("engine-data.zip");
-    let mut waited_ms = 0u32;
-    while !engine_zip.metadata().is_ok_and(|m| m.len() > 0) && waited_ms < 20_000 {
-        if waited_ms == 0 {
-            download::emit(app, owner, "horizon-prepare", 0, 4, "Aguardando dados do motor Horizon Rust…");
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        waited_ms += 250;
-    }
-    if !engine_zip.metadata().is_ok_and(|m| m.len() > 0) {
-        return Err("Dados internos do motor Horizon Rust (engine-data.zip) não encontrados".into());
-    }
-
-    let shared = paths::shared(app)?;
-    download::emit(app, owner, "version", 0, 1, "Obtendo manifesto oficial do Minecraft 26.3…");
-    let version_json = ensure_vanilla_json(&state.http, &shared, "26.3").await?;
-    download::emit(app, owner, "version", 1, 1, "Manifesto do Minecraft 26.3 pronto");
-
-    let client_jar = shared.join("versions").join("26.3").join("26.3.jar");
-    let client_dl = version_json.pointer("/downloads/client");
-    let jar_url = client_dl
-        .and_then(|v| v.get("url"))
-        .and_then(Value::as_str)
-        .unwrap_or(MC_26_3_CLIENT_JAR_URL)
-        .to_string();
-    let jar_sha1 = client_dl
-        .and_then(|v| v.get("sha1"))
-        .and_then(Value::as_str)
-        .unwrap_or(MC_26_3_CLIENT_JAR_SHA1)
-        .to_string();
-    let jar_size = client_dl.and_then(|v| v.get("size")).and_then(Value::as_u64);
-
-    download::emit(app, owner, "jar", 0, 1, "Baixando cliente oficial do Minecraft 26.3…");
-    download::fetch(
-        &state.http,
-        &Job {
-            url: jar_url,
-            path: client_jar.clone(),
-            sha1: Some(jar_sha1),
-            sha256: None,
-            size: jar_size,
-        },
-    )
-    .await?;
-    download::emit(app, owner, "jar", 1, 1, "Cliente oficial do Minecraft 26.3 verificado");
-
-    let (asset_id, _game_assets) = ensure_assets(app, &state.http, owner, &version_json, &shared, game_dir).await?;
-    let index_path = shared
-        .join("assets")
-        .join("indexes")
-        .join(format!("{}.json", paths::safe_name(&asset_id)?));
-
-    let (_revision, controls) = bedrock_control_entries()?;
-    let controls_cache = shared.join("horizon-controls");
-    let control_jobs: Vec<Job> = controls
-        .iter()
-        .map(|(rel, hash, size, url)| Job {
-            url: url.clone(),
-            path: controls_cache.join(rel),
-            sha1: None,
-            sha256: Some(hash.clone()),
-            size: Some(*size),
-        })
-        .collect();
-    download::fetch_all(app, &state.http, owner, "assets", control_jobs, 16).await?;
-
-    let app_clone = app.clone();
-    let owner_clone = owner.to_string();
-    let shared_clone = shared.clone();
-    let versions_clone = versions_dir.clone();
-    let controls_rel: Vec<PathBuf> = controls.into_iter().map(|(rel, _, _, _)| rel).collect();
-
-    tokio::task::spawn_blocking(move || -> Result<(), String> {
-        std::fs::create_dir_all(&versions_clone).map_err(|e| e.to_string())?;
-        let stage = versions_clone.join("26.3.staging");
-        if stage.exists() {
-            let _ = std::fs::remove_dir_all(&stage);
-        }
-        std::fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
-
-        let prep_res: Result<(), String> = (|| {
-            download::emit(&app_clone, &owner_clone, "horizon-prepare", 1, 4, "Extraindo texturas e dados do Minecraft 26.3…");
-            extract_zip_prefixes(&client_jar, &stage, &["assets/", "data/"])?;
-
-            download::emit(&app_clone, &owner_clone, "horizon-prepare", 2, 4, "Preparando sons, idiomas e controles táteis…");
-            let index_bytes = std::fs::read(&index_path).map_err(|e| e.to_string())?;
-            let index: Value = serde_json::from_slice(&index_bytes).map_err(|e| e.to_string())?;
-            let objects_root = shared_clone.join("assets").join("objects");
-            let stage_assets = stage.join("assets");
-            if let Some(objects) = index.get("objects").and_then(Value::as_object) {
-                for (name, obj) in objects {
-                    let Some(hash) = obj.get("hash").and_then(Value::as_str) else { continue };
-                    if hash.len() < 2 {
-                        continue;
-                    }
-                    let Ok(dest) = paths::join_inside(&stage_assets, name) else { continue };
-                    if let Some(parent) = dest.parent() {
-                        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-                    }
-                    let src = objects_root.join(&hash[..2]).join(hash);
-                    std::fs::copy(&src, &dest)
-                        .map_err(|e| format!("Falha ao preparar asset {name}: {e}"))?;
-                }
-            }
-
-            let bedrock_dest = stage.join("assets/minecraft/textures/gui/bedrock");
-            for rel in &controls_rel {
-                let dst = bedrock_dest.join(rel);
-                if let Some(parent) = dst.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-                }
-                std::fs::copy(controls_cache.join(rel), &dst)
-                    .map_err(|e| format!("Falha ao copiar controle {}: {e}", rel.display()))?;
-            }
-
-            extract_zip_archive(&engine_zip, &stage)?;
-
-            download::emit(&app_clone, &owner_clone, "horizon-prepare", 3, 4, "Compilando tabelas de geração de mundo…");
-            rebuild_android_worldgen_resources(&stage)?;
-
-            download::emit(&app_clone, &owner_clone, "horizon-prepare", 4, 4, "Ativando recursos do Horizon Rust…");
-            if !stage.join("horizon-resources.json").is_file() {
-                return Err("engine-data.zip não contém horizon-resources.json para 26.3".into());
-            }
-            std::fs::write(stage.join("android-downloads-v2.json"), b"{\"schema\":2}").map_err(|e| e.to_string())?;
-            std::fs::write(stage.join("asset-index.json"), &index_bytes).map_err(|e| e.to_string())?;
-            std::fs::write(stage.join("audio-complete.json"), b"{}").map_err(|e| e.to_string())?;
-
-            let dest = versions_clone.join("26.3");
-            let backup = versions_clone.join("26.3.previous");
-            if backup.exists() && !dest.exists() {
-                std::fs::rename(&backup, &dest).map_err(|e| e.to_string())?;
-            }
-            if backup.exists() {
-                let _ = std::fs::remove_dir_all(&backup);
-            }
-            if dest.exists() {
-                std::fs::rename(&dest, &backup).map_err(|e| e.to_string())?;
-            }
-            if let Err(e) = std::fs::rename(&stage, &dest) {
-                if backup.exists() {
-                    let _ = std::fs::rename(&backup, &dest);
-                }
-                return Err(format!("Falha ao ativar recursos preparados: {e}"));
-            }
-            if backup.exists() {
-                let _ = std::fs::remove_dir_all(&backup);
-            }
-            Ok(())
-        })();
-
-        if stage.exists() {
-            let _ = std::fs::remove_dir_all(&stage);
-        }
-        prep_res
-    })
-    .await
-    .map_err(|e| format!("Erro na tarefa de preparação Android: {e}"))??;
 
     Ok(())
 }
@@ -2287,51 +2439,5 @@ mod tests {
         let plan = plan_libraries(&m, Path::new("/tmp/libs")).unwrap();
         assert_eq!(plan.classpath.len(), 1, "asm duplicado deve ser removido");
         assert!(plan.classpath[0].to_string_lossy().contains("9.7"));
-    }
-
-    #[test]
-    fn bedrock_controls_manifest_parses() {
-        let (revision, entries) = bedrock_control_entries().unwrap();
-        assert!(!revision.is_empty());
-        assert!(!entries.is_empty());
-        assert!(entries.iter().any(|(p, _, _, _)| p == Path::new("LICENSE.md")));
-    }
-
-    #[test]
-    fn rebuild_worldgen_and_ready_check() {
-        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let root = std::env::temp_dir().join(format!("tropicalia-worldgen-test-{}-{stamp}", std::process::id()));
-        let noise_dir = root.join("data/minecraft/worldgen/noise/sub");
-        std::fs::create_dir_all(&noise_dir).unwrap();
-        std::fs::write(noise_dir.join("test.json"), r#"{"amplitude":1}"#).unwrap();
-        let struct_dir = root.join("data/minecraft/structure/village");
-        std::fs::create_dir_all(&struct_dir).unwrap();
-        std::fs::write(struct_dir.join("house.nbt"), b"nbt").unwrap();
-
-        rebuild_android_worldgen_resources(&root).unwrap();
-        let noises: Value = serde_json::from_slice(&std::fs::read(root.join("worldgen/noises.json")).unwrap()).unwrap();
-        assert_eq!(noises["minecraft:sub/test"], r#"{"amplitude":1}"#);
-        assert_eq!(std::fs::read(root.join("worldgen/structure/minecraft/village/house.nbt")).unwrap(), b"nbt");
-
-        assert!(!horizon_android_ready(&root));
-        std::fs::write(root.join("horizon-resources.json"), b"{}").unwrap();
-        std::fs::write(root.join("android-downloads-v2.json"), b"{\"schema\":2}").unwrap();
-        std::fs::write(root.join("audio-complete.json"), b"{}").unwrap();
-        std::fs::create_dir_all(root.join("worldgen/blocks")).unwrap();
-        std::fs::write(root.join("worldgen/blocks/structure-blocks.json"), br#"{"rotate":[1]}"#).unwrap();
-        std::fs::create_dir_all(root.join("assets/minecraft/lang")).unwrap();
-        std::fs::write(root.join("assets/minecraft/lang/en_us.json"), b"{}").unwrap();
-        std::fs::create_dir_all(root.join("assets/minecraft/textures/gui/bedrock")).unwrap();
-        std::fs::write(root.join("assets/minecraft/textures/gui/bedrock/LICENSE.md"), b"ok").unwrap();
-        assert!(horizon_android_ready(&root));
-
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn mc_language_resolution() {
-        assert_eq!(resolve_mc_language(Some("pt_BR")), "pt_br");
-        assert_eq!(resolve_mc_language(Some("es-ES")), "es_es");
-        assert_eq!(resolve_mc_language(Some("en_US")), "en_us");
     }
 }

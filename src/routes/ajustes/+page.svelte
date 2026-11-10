@@ -4,43 +4,21 @@
 	import TabSelector from '$lib/components/TabSelector.svelte';
 	import Toggle from '$lib/components/Toggle.svelte';
 	import { app, PERF_PROFILES, suggestedMemory, toasts } from '$lib/state.svelte';
-	import { i18n, resolveLanguage } from '$lib/i18n';
 	import { isTauri, openFolder, openUrl } from '$lib/platform';
 	import { ExternalLink, FolderOpen, RefreshCw, Save } from 'lucide-svelte';
 
 	const s = app.settings;
-	const t = $derived(i18n[resolveLanguage(app.settings.language)] || i18n.en);
 	const maxRam = $derived(Math.max(2048, app.system.totalMemoryMb - 1024));
 
 	function save() {
 		app.saveSettings();
-		toasts.ok(t.savedToast);
+		toasts.ok('Ajustes salvos');
 	}
 </script>
 
 <div class="mx-auto grid max-w-[1100px] grid-cols-1 md:grid-cols-2 gap-5 md:gap-6">
-	<TropicaliaCard title={t.languageTitle} subtitle={t.languageLabel} class="col-span-1 md:col-span-2">
-		<div class="overflow-x-auto pb-1 scrollbar-none">
-			<TabSelector
-				tabs={[
-					{ id: 'auto', label: t.languageAuto },
-					{ id: 'pt', label: 'Português (BR)' },
-					{ id: 'en', label: 'English' },
-					{ id: 'es', label: 'Español' }
-				]}
-				value={s.language ?? 'auto'}
-				size="sm"
-				onchange={(val) => {
-					s.language = val as 'auto' | 'pt' | 'en' | 'es';
-					save();
-				}}
-			/>
-		</div>
-		<p class="tp-help mt-3">{t.languageHelp}</p>
-	</TropicaliaCard>
-
-	<TropicaliaCard title={t.msTitle} subtitle={t.msSubtitle} class="col-span-1 md:col-span-2">
-		<label class="tp-label" for="cid">{t.msClientIdLabel}</label>
+	<TropicaliaCard title="Conta Microsoft" subtitle="Login oficial via Device Code" class="col-span-1 md:col-span-2">
+		<label class="tp-label" for="cid">Client ID do app no Azure (Entra ID)</label>
 		<input id="cid" class="tp-input font-mono" placeholder="00000000-0000-0000-0000-000000000000" bind:value={s.msClientId} onchange={save} />
 		<div class="tp-help mt-3 space-y-1.5 text-[12.5px] leading-relaxed">
 			<p>Para o login Microsoft funcionar, o launcher precisa de um app registrado:</p>
@@ -58,7 +36,7 @@
 		</div>
 	</TropicaliaCard>
 
-	<TropicaliaCard title={t.perfTitle}>
+	<TropicaliaCard title="Desempenho">
 		<div class="overflow-x-auto pb-1 scrollbar-none">
 			<TabSelector
 				tabs={Object.entries(PERF_PROFILES).map(([id, p]) => ({ id, label: p.label }))}
@@ -72,7 +50,7 @@
 
 		<div class="mt-5">
 			<div class="flex items-baseline justify-between">
-				<label class="tp-label" for="ram">{t.ramLabel}</label>
+				<label class="tp-label" for="ram">RAM padrão de novas instâncias</label>
 				<span class="font-mc mc-shadow-sm text-[12px] text-[#bef264]">{(s.defaultMemoryMb / 1024).toFixed(1)} GB</span>
 			</div>
 			<input id="ram" type="range" class="tp-range" min="1024" max={maxRam} step="512" bind:value={s.defaultMemoryMb} onchange={save} />
@@ -80,40 +58,61 @@
 				Sugestão para {(app.system.totalMemoryMb / 1024).toFixed(0)} GB de RAM: {(suggestedMemory(app.system.totalMemoryMb) / 1024).toFixed(1)} GB.
 			</p>
 		</div>
+
+		<div class="mt-5 space-y-4 pt-4 border-t border-[#1d2a23]">
+			<div>
+				<label class="tp-label" for="def-rdr">Renderizador Padrão Java (Pojav / Mobile)</label>
+				<select id="def-rdr" class="tp-select" bind:value={s.defaultJavaRenderer} onchange={save}>
+					<option value="opengles_mobileglues">Holy GL4ES / MobileGlues (Recomendado)</option>
+					<option value="opengles3_desktopgl_zink_kopper">Vulkan Zink Kopper (Alto Desempenho)</option>
+					<option value="vulkan_zink">Vulkan Zink OSMesa (Mesa 23.0.4)</option>
+					<option value="opengles2">NG-GL4ES (Krypton Wrapper · Legado)</option>
+					<option value="opengles3_ltw">LTW Renderer (GLES3 Otimizado)</option>
+				</select>
+				<p class="tp-help">Renderizador gráfico inicial aplicado a novas instâncias Java.</p>
+			</div>
+
+			<Toggle
+				bind:checked={s.defaultUseAngle}
+				label="Usar ANGLE por padrão"
+				help="Executa rotinas OpenGL ES sobre o backend Google ANGLE Vulkan."
+				onchange={save}
+			/>
+		</div>
 	</TropicaliaCard>
 
-	<TropicaliaCard title={t.behaviorTitle}>
+	<TropicaliaCard title="Comportamento">
 		<div class="flex flex-col gap-5">
 			<Toggle
 				bind:checked={s.hideOnLaunch}
-				label={t.hideOnLaunch}
-				help={t.hideOnLaunchHelp}
+				label="Ir para a bandeja ao abrir o jogo"
+				help="O launcher some da barra de tarefas e volta sozinho quando o Minecraft fechar."
 				onchange={save}
 			/>
 			<div>
-				<label class="tp-label" for="java">{t.javaManual}</label>
-				<input id="java" class="tp-input font-mono" placeholder={t.javaManualPlaceholder} bind:value={s.javaPath} onchange={save} />
-				<p class="tp-help">{t.javaManualHelp}</p>
+				<label class="tp-label" for="java">Java manual (opcional)</label>
+				<input id="java" class="tp-input font-mono" placeholder="Automático: Java oficial da Mojang por versão" bind:value={s.javaPath} onchange={save} />
+				<p class="tp-help">Deixe vazio: o launcher baixa o Java 8, 17 ou 21 certo para cada versão.</p>
 			</div>
 			<div class="flex flex-wrap gap-2.5">
-				<PixelButton size="sm" icon={FolderOpen} disabled={!isTauri} onclick={() => openFolder('root').catch(toasts.err)}>{t.dataFolder}</PixelButton>
-				<PixelButton size="sm" variant="emerald" icon={Save} onclick={save}>{t.save}</PixelButton>
+				<PixelButton size="sm" icon={FolderOpen} disabled={!isTauri} onclick={() => openFolder('root').catch(toasts.err)}>Pasta de dados</PixelButton>
+				<PixelButton size="sm" variant="emerald" icon={Save} onclick={save}>Salvar</PixelButton>
 			</div>
 		</div>
 	</TropicaliaCard>
 
-	<TropicaliaCard title={t.aboutTitle} class="col-span-1 md:col-span-2" size="sm">
+	<TropicaliaCard title="Sobre" class="col-span-1 md:col-span-2" size="sm">
 		<div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
 			<div>
 				<p class="tp-muted text-[12.5px]">
 					Tropicalia Launcher 0.1.0 · {app.system.os} {app.system.arch} · {app.system.cpus} núcleos · {(app.system.totalMemoryMb / 1024).toFixed(1)} GB RAM.
 				</p>
 				<p class="tp-muted text-[11.5px] mt-0.5">
-					{t.aboutDisclaimer}
+					Minecraft é marca da Mojang/Microsoft; este launcher não é oficial. Atualizações silenciosas automáticas ativas.
 				</p>
 			</div>
 			<PixelButton size="sm" icon={RefreshCw} class="shrink-0" onclick={() => app.checkUpdates(true)}>
-				{t.checkUpdates}
+				Verificar atualizações
 			</PixelButton>
 		</div>
 	</TropicaliaCard>
