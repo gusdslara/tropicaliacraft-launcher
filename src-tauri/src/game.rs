@@ -48,6 +48,8 @@ pub struct LaunchRequest {
     pub loader: String,
     #[serde(default)]
     pub loader_version: Option<String>,
+    #[serde(default)]
+    pub engine: Option<String>,
     pub account: LaunchAccount,
     pub memory_min_mb: u32,
     pub memory_max_mb: u32,
@@ -846,7 +848,7 @@ pub async fn game_launch(app: AppHandle, state: State<'_, AppState>, req: Launch
     }
 
     // Se for motor Rust (Horizon)
-    if req.loader == "horizon-rust" {
+    if req.loader == "horizon-rust" || req.engine.as_deref() == Some("rust") {
         return launch_horizon_rust(&app, &state, &req).await;
     }
 
@@ -944,9 +946,28 @@ pub async fn game_launch(app: AppHandle, state: State<'_, AppState>, req: Launch
             "jvmArgs": req.jvm_args.join(" "),
             "serverAddress": req.server_address,
         });
-        let trigger_file = paths::root(&app)?.join("tropicalia-java-launch.json");
+        let root_dir = paths::root(&app)?;
+        let trigger_file = root_dir.join("tropicalia-java-launch.json");
         std::fs::write(&trigger_file, serde_json::to_vec_pretty(&launch_payload).unwrap())
             .map_err(|e| format!("Falha ao acionar o motor Java Android: {e}"))?;
+
+        // Também grava em files/ se existir
+        let files_dir = root_dir.join("files");
+        if files_dir.exists() || std::fs::create_dir_all(&files_dir).is_ok() {
+            let _ = std::fs::write(files_dir.join("tropicalia-java-launch.json"), serde_json::to_vec_pretty(&launch_payload).unwrap());
+        }
+
+        // Tenta sincronizar o json da versão e client.jar com PojavLauncher
+        let pojav_version_dir = PathBuf::from("/storage/emulated/0/Android/data/net.kdt.pojavlaunch/files/.minecraft/versions").join(&version_id);
+        if std::fs::create_dir_all(&pojav_version_dir).is_ok() {
+            let src_json = version_json_path(&shared, &version_id);
+            if src_json.exists() {
+                let _ = std::fs::copy(&src_json, pojav_version_dir.join(format!("{version_id}.json")));
+            }
+            if client_jar.exists() {
+                let _ = std::fs::copy(&client_jar, pojav_version_dir.join(format!("{version_id}.jar")));
+            }
+        }
 
         let _ = app.emit("game://started", json!({ "owner": owner, "pid": 1 }));
         let app2 = app.clone();
@@ -1149,6 +1170,28 @@ pub async fn launch_horizon_rust(app: &AppHandle, state: &State<'_, AppState>, r
     let mods_dir = game_dir.join("horizon-mods");
     let _ = std::fs::create_dir_all(&mods_dir);
     sync_options_language(&game_dir);
+    sync_horizon_options_to_dir(&game_dir, req)?;
+
+    // Preparar arquivo de sessão caso o usuário esteja autenticado (Microsoft / MSA)
+    let session_file_path = if req.account.user_type == "msa"
+        && !req.account.access_token.is_empty()
+        && req.account.access_token != "0"
+    {
+        let sessions_dir = game_dir.join("sessions");
+        let _ = std::fs::create_dir_all(&sessions_dir);
+        let sf = sessions_dir.join("tropicalia-session.json");
+        let session_body = json!({
+            "name": req.account.username,
+            "uuid": req.account.uuid,
+            "access_token": req.account.access_token,
+            "user_type": "msa",
+            "xuid": null
+        });
+        let _ = std::fs::write(&sf, serde_json::to_vec(&session_body).unwrap_or_default());
+        Some(sf)
+    } else {
+        None
+    };
 
     #[cfg(target_os = "android")]
     {
@@ -1156,14 +1199,40 @@ pub async fn launch_horizon_rust(app: &AppHandle, state: &State<'_, AppState>, r
         download::emit(app, &owner, "launch", 1, 1, "Iniciando Horizon Rust (26.3) no Android…");
         let root_dir = paths::root(app)?;
         let mc_lang = map_to_mc_language(&detect_system_locale());
+
+        let mut extra_args: Vec<String> = Vec::new();
+        if let Some(rd) = req.horizon_render_distance {
+            extra_args.push("--render-distance".into());
+            extra_args.push(rd.to_string());
+        }
+        if req.horizon_creative.unwrap_or(false) {
+            extra_args.push("--creative".into());
+        }
+        if req.horizon_test_terrain.unwrap_or(false) {
+            extra_args.push("--test-terrain".into());
+        }
+        if req.horizon_pregen.unwrap_or(false) {
+            extra_args.push("--pregen".into());
+        }
+        if let Some(custom_args) = &req.horizon_args {
+            for a in custom_args {
+                extra_args.push(a.clone());
+            }
+        }
+
         let launcher_cfg = json!({
             "name": if req.account.username.is_empty() { "Player" } else { &req.account.username },
             "server": req.server_address.clone().unwrap_or_default(),
+            "game_dir": game_dir.to_string_lossy(),
+            "session_file": session_file_path.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
             "lang": mc_lang,
+            "extra_arguments": extra_args,
         });
         let _ = std::fs::write(root_dir.join("android-launcher.json"), serde_json::to_vec_pretty(&launcher_cfg).unwrap());
+        let _ = std::fs::write(root_dir.join("android-launch.json"), serde_json::to_vec(&extra_args).unwrap());
         let _ = std::fs::write(root_dir.join("tropicalia-auto.flag"), b"1");
         sync_options_language(&root_dir);
+        let _ = sync_horizon_options_to_dir(&root_dir, req);
         let trigger_file = root_dir.join("tropicalia-horizon-launch.json");
         std::fs::write(&trigger_file, serde_json::to_vec_pretty(&launcher_cfg).unwrap())
             .map_err(|e| format!("Falha ao acionar o motor Horizon Rust Android: {e}"))?;
@@ -1172,8 +1241,10 @@ pub async fn launch_horizon_rust(app: &AppHandle, state: &State<'_, AppState>, r
         let files_dir = root_dir.join("files");
         if files_dir.exists() || std::fs::create_dir_all(&files_dir).is_ok() {
             let _ = std::fs::write(files_dir.join("android-launcher.json"), serde_json::to_vec_pretty(&launcher_cfg).unwrap());
+            let _ = std::fs::write(files_dir.join("android-launch.json"), serde_json::to_vec(&extra_args).unwrap());
             let _ = std::fs::write(files_dir.join("tropicalia-auto.flag"), b"1");
             sync_options_language(&files_dir);
+            let _ = sync_horizon_options_to_dir(&files_dir, req);
             let _ = std::fs::write(files_dir.join("tropicalia-horizon-launch.json"), serde_json::to_vec_pretty(&launcher_cfg).unwrap());
         }
 
@@ -1216,7 +1287,9 @@ pub async fn launch_horizon_rust(app: &AppHandle, state: &State<'_, AppState>, r
         if let Some(rd) = req.horizon_render_distance {
             cmd.arg("--render-distance").arg(rd.to_string());
         }
-        if !req.account.username.is_empty() {
+        if let Some(sf) = &session_file_path {
+            cmd.arg("--session-file").arg(sf);
+        } else if !req.account.username.is_empty() {
             cmd.arg("--name").arg(&req.account.username);
         }
         if let Some(addr) = &req.server_address {
@@ -1548,13 +1621,32 @@ pub fn write_or_update_key_value_file(path: &Path, updates: &HashMap<&str, Strin
 fn sync_horizon_options_to_dir(game_dir: &Path, req: &LaunchRequest) -> Result<(), String> {
     std::fs::create_dir_all(game_dir).map_err(|e| e.to_string())?;
 
-    // 1. options.txt
+    // 1. options.txt (idioma, distância de renderização, pacotes de recursos ativos)
     let opt_path = game_dir.join("options.txt");
     let mut opt_updates = HashMap::new();
     if let Some(rd) = req.horizon_render_distance {
         opt_updates.insert("renderDistance", rd.to_string());
     }
-    opt_updates.insert("lang", "pt_br".to_string());
+    let mc_lang = map_to_mc_language(&detect_system_locale());
+    opt_updates.insert("lang", mc_lang.to_string());
+    opt_updates.insert("onboardAccessibility", "false".to_string());
+    opt_updates.insert("skipMultiplayerWarning", "true".to_string());
+
+    let rp_dir = game_dir.join("resourcepacks");
+    if rp_dir.is_dir() {
+        let mut active_packs = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&rp_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if !name.ends_with(".disabled") && (name.ends_with(".zip") || entry.path().is_dir()) {
+                    active_packs.push(format!("\"file/{name}\""));
+                }
+            }
+        }
+        if !active_packs.is_empty() {
+            opt_updates.insert("resourcePacks", format!("[{}]", active_packs.join(",")));
+        }
+    }
     let _ = write_or_update_key_value_file(&opt_path, &opt_updates);
 
     // 2. horizon-graphics.txt
@@ -1575,6 +1667,18 @@ fn sync_horizon_options_to_dir(game_dir: &Path, req: &LaunchRequest) -> Result<(
     }
     if let Some(f) = req.horizon_fxaa {
         gfx_updates.insert("fxaa", f.to_string());
+    }
+    let sp_dir = game_dir.join("shaderpacks");
+    if sp_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&sp_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if !name.ends_with(".disabled") && (name.ends_with(".hshader") || name.ends_with(".zip")) {
+                    gfx_updates.insert("shaderPack", name);
+                    break;
+                }
+            }
+        }
     }
     let _ = write_or_update_key_value_file(&gfx_path, &gfx_updates);
 
@@ -1603,6 +1707,28 @@ fn sync_horizon_options_to_dir(game_dir: &Path, req: &LaunchRequest) -> Result<(
         ext_updates.insert("discordPresence", dp.to_string());
     }
     let _ = write_or_update_key_value_file(&ext_path, &ext_updates);
+
+    // 4. horizon-mods.txt (habilita todos os .hmod ativos na pasta horizon-mods/ + módulos nativos)
+    let mods_dir = game_dir.join("horizon-mods");
+    let mut mod_lines = Vec::new();
+    if mods_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&mods_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if let Some(id) = name.strip_suffix(".hmod") {
+                    mod_lines.push(format!("mod.{id}:true"));
+                } else if let Some(id) = name.strip_suffix(".hmod.disabled") {
+                    mod_lines.push(format!("mod.{id}:false"));
+                }
+            }
+        }
+    }
+    // Módulos nativos embutidos do Horizon
+    mod_lines.push(format!("mod.zoom:{}", req.horizon_zoom.unwrap_or(true)));
+    mod_lines.push(format!("mod.minimap:{}", req.horizon_minimap.unwrap_or(false)));
+    mod_lines.push("mod.recipes:true".to_string());
+    mod_lines.push("mod.smartf3:true".to_string());
+    let _ = std::fs::write(game_dir.join("horizon-mods.txt"), mod_lines.join("\n") + "\n");
 
     Ok(())
 }

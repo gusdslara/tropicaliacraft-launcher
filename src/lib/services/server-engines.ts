@@ -60,6 +60,14 @@ export const ENGINES: EngineInfo[] = [
 		site: 'https://papermc.io'
 	},
 	{
+		id: 'folia',
+		name: 'Folia',
+		category: 'plugins',
+		tagline: 'Fork do Paper com multithreading por regiões (alta capacidade).',
+		accepts: ['plugin'],
+		site: 'https://papermc.io/software/folia'
+	},
+	{
 		id: 'purpur',
 		name: 'Purpur',
 		category: 'plugins',
@@ -124,8 +132,15 @@ export async function engineVersions(id: ServerEngine, flavor?: string): Promise
 				const p = await getJson<{ versions: Record<string, string[]> }>('https://fill.papermc.io/v3/projects/paper');
 				return sortVersions(Object.values(p.versions).flat().filter((v) => !/pre|rc/.test(v)));
 			} catch {
-				const p = await getJson<{ versions: string[] }>('https://api.papermc.io/v2/projects/paper');
-				return sortVersions(p.versions.filter((v) => !/pre|rc/.test(v)));
+				return ['1.21.4', '1.21.1', '1.20.4', '1.20.2', '1.20.1', '1.19.4', '1.18.2', '1.16.5'];
+			}
+		}
+		case 'folia': {
+			try {
+				const p = await getJson<{ versions: Record<string, string[]> }>('https://fill.papermc.io/v3/projects/folia');
+				return sortVersions(Object.values(p.versions).flat().filter((v) => !/pre|rc/.test(v)));
+			} catch {
+				return ['1.21.4', '1.21.1', '1.20.6', '1.20.4', '1.20.2', '1.20.1', '1.19.4'];
 			}
 		}
 		case 'purpur': {
@@ -158,16 +173,40 @@ export async function resolveJar(id: ServerEngine, mc: string, flavor?: string):
 				const dl = b?.downloads['server:default'];
 				if (dl) return { url: dl.url, label: `Paper ${mc} #${b.id}` };
 			} catch {
-				/* cai para a API v2 */
+				/* cai para fallback mcjars */
 			}
-			const v2 = await getJson<{ builds: Array<{ build: number; channel: string; downloads: { application: { name: string } } }> }>(
-				`https://api.papermc.io/v2/projects/paper/versions/${mc}/builds`
-			);
-			const b = [...v2.builds].reverse().find((x) => x.channel === 'default') ?? v2.builds.at(-1)!;
-			return {
-				url: `https://api.papermc.io/v2/projects/paper/versions/${mc}/builds/${b.build}/downloads/${b.downloads.application.name}`,
-				label: `Paper ${mc} #${b.build}`
-			};
+			try {
+				const res = await getJson<{ builds: Array<{ name: string; jarUrl: string }> }>(
+					`https://mcjars.app/api/v1/builds/PAPER/${mc}`
+				);
+				const b = res.builds[0];
+				if (b?.jarUrl) return { url: b.jarUrl, label: `Paper ${mc} ${b.name}` };
+			} catch {
+				/* continua */
+			}
+			throw new Error(`Não foi possível resolver o JAR do Paper para a versão ${mc}`);
+		}
+		case 'folia': {
+			try {
+				const builds = await getJson<
+					Array<{ id: number; channel: string; downloads: Record<string, { name: string; url: string }> }>
+				>(`https://fill.papermc.io/v3/projects/folia/versions/${mc}/builds`);
+				const b = builds.find((x) => x.channel === 'STABLE') ?? builds[0];
+				const dl = b?.downloads['server:default'];
+				if (dl) return { url: dl.url, label: `Folia ${mc} #${b.id}` };
+			} catch {
+				/* cai para fallback mcjars */
+			}
+			try {
+				const res = await getJson<{ builds: Array<{ name: string; jarUrl: string }> }>(
+					`https://mcjars.app/api/v1/builds/FOLIA/${mc}`
+				);
+				const b = res.builds[0];
+				if (b?.jarUrl) return { url: b.jarUrl, label: `Folia ${mc} ${b.name}` };
+			} catch {
+				/* continua */
+			}
+			throw new Error(`Não foi possível resolver o JAR do Folia para a versão ${mc}`);
 		}
 		case 'purpur':
 			return { url: `https://api.purpurmc.org/v2/purpur/${mc}/latest/download`, label: `Purpur ${mc} (última build)` };
@@ -194,11 +233,19 @@ export async function resolveJar(id: ServerEngine, mc: string, flavor?: string):
 				url: `https://api.mohistmc.com/project/mohist/${mc}/builds/latest/download`,
 				label: `Mohist ${mc} (última build)`
 			};
-		case 'magma':
-			return {
-				url: `https://api.magmafoundation.org/api/v2/${mc}/latest/download`,
-				label: `Magma ${mc} (última build)`
+		case 'magma': {
+			// Tenta API oficial ou fallback para builds estáveis do GitHub Magma-Forge
+			const fallbackUrls: Record<string, string> = {
+				'1.20.1': 'https://github.com/magmafoundation/Magma-Forge/releases/download/va549e0d-DEV/Magma-a549e0d-DEV-server.jar',
+				'1.18.2': 'https://github.com/magmafoundation/Magma-Forge/releases/download/v5269561-DEV/Magma-5269561-DEV-server.jar',
+				'1.12.2': 'https://github.com/magmafoundation/Magma-Forge/releases/download/v537f1d6/Magma-537f1d6-server.jar'
 			};
+			const url = fallbackUrls[mc] ?? `https://api.magmafoundation.org/api/v2/${mc}/latest/download`;
+			return {
+				url,
+				label: `Magma ${mc} (última build estável)`
+			};
+		}
 	}
 }
 

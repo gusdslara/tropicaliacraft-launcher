@@ -415,6 +415,7 @@ class App {
 					gameVersion: inst.gameVersion,
 					loader: inst.loader,
 					loaderVersion: inst.loaderVersion ?? null,
+					engine: inst.engine ?? (inst.loader === 'horizon-rust' ? 'rust' : 'java'),
 					account,
 					memoryMinMb: inst.memory.minMb,
 					memoryMaxMb: inst.memory.maxMb,

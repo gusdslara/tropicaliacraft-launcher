@@ -91,7 +91,7 @@
 			const inst = app.newInstance({
 				name: name.trim(),
 				icon,
-				engine: loader === 'horizon-rust' ? 'rust' : 'java',
+				engine: loader === 'horizon-rust' ? 'rust' : (app.system.os === 'android' ? 'java_pojav' : 'java_native'),
 				gameVersion: loader === 'horizon-rust' ? '26.3' : gameVersion,
 				loader,
 				loaderVersion: loader === 'vanilla' || loader === 'horizon-rust' ? undefined : loaderVersion,

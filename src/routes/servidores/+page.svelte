@@ -460,7 +460,7 @@
 			<div class="py-14 text-center">
 				<p class="font-mc mc-shadow text-[16px] text-white">Crie seu servidor</p>
 				<p class="tp-muted mx-auto mt-3 max-w-[460px] text-[13px]">
-					Híbrido com Magma, Mohist ou Arclight roda mods <b>e</b> plugins juntos. Ou use Paper/Purpur para plugins e Fabric para mods leves.
+					Híbrido com Magma, Mohist ou Arclight roda mods <b>e</b> plugins juntos. Ou use Paper, Purpur ou Folia para plugins e Fabric para mods leves.
 				</p>
 				<PixelButton variant="emerald" icon={Plus} class="mt-6" onclick={() => ((wizardOpen = true), (step = 1))}>Novo servidor</PixelButton>
 			</div>
@@ -473,7 +473,7 @@
 		<div class="grid gap-3">
 			{#each [
 				{ c: 'hybrid', t: '⭐ Híbrido (mods + plugins)', d: 'Magma, Mohist ou Arclight: Create, Mekanism… junto com LuckPerms, EssentialsX.' },
-				{ c: 'plugins', t: 'Só plugins', d: 'Paper ou Purpur: o mais leve e estável para minigames e survival com plugins.' },
+				{ c: 'plugins', t: 'Só plugins', d: 'Paper, Purpur ou Folia: o mais leve e estável para minigames e survival com plugins.' },
 				{ c: 'mods', t: 'Só mods', d: 'Fabric Server: leve, ideal para mods de performance e conteúdo Fabric.' }
 			] as o (o.c)}
 				<button class="choice" onclick={() => pickCategory(o.c as EngineInfo['category'])}>

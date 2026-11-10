@@ -1,7 +1,7 @@
 // Contratos do launcher (adaptados de tropicalia-launcher-lab/engine-specs).
 
 export type ModLoader = 'vanilla' | 'fabric' | 'quilt' | 'forge' | 'neoforge' | 'horizon-rust';
-export type EngineType = 'java' | 'rust';
+export type EngineType = 'java' | 'rust' | 'java_pojav' | 'java_native';
 export type ContentKind = 'mod' | 'resourcepack' | 'shader' | 'datapack' | 'modpack' | 'plugin';
 
 export interface Account {
@@ -80,7 +80,7 @@ export interface Instance {
 	playTimeMinutes: number;
 }
 
-export type ServerEngine = 'magma' | 'mohist' | 'arclight' | 'paper' | 'purpur' | 'fabric';
+export type ServerEngine = 'magma' | 'mohist' | 'arclight' | 'paper' | 'purpur' | 'folia' | 'fabric';
 export type ServerStatus = 'stopped' | 'installing' | 'starting' | 'running' | 'stopping' | 'crashed';
 
 export interface LocalServer {

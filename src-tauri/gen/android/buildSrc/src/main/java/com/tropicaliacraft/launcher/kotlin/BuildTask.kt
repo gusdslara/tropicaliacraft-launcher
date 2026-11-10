@@ -23,10 +23,47 @@ abstract class BuildTask : DefaultTask() {
 
     @TaskAction
     fun assemble() {
+        val abi = when (target) {
+            "aarch64" -> "arm64-v8a"
+            "armv7" -> "armeabi-v7a"
+            "i686" -> "x86"
+            "x86_64" -> "x86_64"
+            else -> "arm64-v8a"
+        }
+        val mode = if (release == true) "release" else "debug"
+        val targetTriple = when (target) {
+            "aarch64" -> "aarch64-linux-android"
+            "armv7" -> "armv7-linux-androideabi"
+            "i686" -> "i686-linux-android"
+            "x86_64" -> "x86_64-linux-android"
+            else -> "${target}-linux-android"
+        }
+        val targetSo = File(projectDir, "../../../target/$targetTriple/$mode/libtropicalia_launcher_lib.so")
+        val destDir = File(projectDir, "src/main/jniLibs/$abi")
+        val destSo = File(destDir, "libtropicalia_launcher_lib.so")
+
+        if (destSo.exists()) {
+            logger.lifecycle("Native library $destSo already present in jniLibs, using it.")
+            return
+        }
+
+        if (targetSo.exists()) {
+            destDir.mkdirs()
+            targetSo.copyTo(destSo, overwrite = true)
+            logger.lifecycle("Copied native library $targetSo to $destSo successfully!")
+            return
+        }
+
         val executable = """npm""";
         try {
             runTauriCli(executable)
         } catch (e: Exception) {
+            if (targetSo.exists()) {
+                destDir.mkdirs()
+                targetSo.copyTo(destSo, overwrite = true)
+                logger.lifecycle("Copied native library after CLI fallback: $targetSo to $destSo")
+                return
+            }
             if (Os.isFamily(Os.FAMILY_WINDOWS)) {
                 // Try different Windows-specific extensions
                 val fallbacks = listOf(
@@ -43,6 +80,12 @@ abstract class BuildTask : DefaultTask() {
                     } catch (fallbackException: Exception) {
                         lastException = fallbackException
                     }
+                }
+                if (targetSo.exists()) {
+                    destDir.mkdirs()
+                    targetSo.copyTo(destSo, overwrite = true)
+                    logger.lifecycle("Copied native library after fallback: $targetSo to $destSo")
+                    return
                 }
                 throw lastException
             } else {

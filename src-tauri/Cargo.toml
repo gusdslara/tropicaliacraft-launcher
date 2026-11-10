@@ -50,3 +50,7 @@ lto = true
 opt-level = 3
 panic = "abort"
 strip = true
+
+[profile.dev]
+debug = 0
+strip = "debuginfo"
