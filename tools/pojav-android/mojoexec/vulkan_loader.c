@@ -60,7 +60,8 @@ void* mojoexec_acq_vulkan_handle() {
             return linker_ns_dlopen("libmjlvlk.so", flags);
     }
 #endif
-    void* vulkan_ptr = dlopen("libvulkan.so", flags);
+    void* vulkan_ptr = dlopen("libtropicalia_vulkan.so", flags);
+    if(vulkan_ptr == NULL) vulkan_ptr = dlopen("libvulkan.so", flags);
     printf("MojoExec: loaded system vulkan, ptr=%p\n", vulkan_ptr);
     return vulkan_ptr;
 }

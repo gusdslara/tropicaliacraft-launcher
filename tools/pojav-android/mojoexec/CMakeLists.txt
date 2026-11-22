@@ -30,3 +30,6 @@ target_link_options(mojoexec PRIVATE "-Wl,--version-script=${CMAKE_CURRENT_SOURC
 set_target_properties(mojoexec PROPERTIES
         LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/version.script"
 )
+
+add_library(tropicalia_vulkan SHARED vulkan_shim.c)
+target_link_options(tropicalia_vulkan PRIVATE "-Wl,-z,max-page-size=16384")
