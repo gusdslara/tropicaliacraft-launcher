@@ -443,19 +443,19 @@ impl TouchControls {
                         }
                     }
                 } else {
-                    sprite(b, a, "ui/joystick_frame", [x, y, size, size], color);
-                    sprite(
-                        b,
-                        a,
-                        "ui/joystick_knob",
-                        [
-                            x + size * (0.33 + state.left[0] * 0.25),
-                            y + size * (0.33 - state.left[1] * 0.25),
-                            size * 0.34,
-                            size * 0.34,
-                        ],
-                        color,
-                    );
+                    let knob = [
+                        x + size * (0.33 + state.left[0] * 0.25),
+                        y + size * (0.33 - state.left[1] * 0.25),
+                        size * 0.34,
+                        size * 0.34,
+                    ];
+                    let moving = state.left[0].abs() > 0.05 || state.left[1].abs() > 0.05;
+                    if !theme_button(b, a, "joystick_frame", [x, y, size, size], false, color, false) {
+                        sprite(b, a, "ui/joystick_frame", [x, y, size, size], color);
+                    }
+                    if !theme_button(b, a, "joystick_knob", knob, moving, color, false) {
+                        sprite(b, a, "ui/joystick_knob", knob, color);
+                    }
                 }
             } else {
                 let pressed = held
@@ -469,7 +469,15 @@ impl TouchControls {
                     Control::Settings => Some("settings"),
                     Control::Debug => Some("debug"),
                     Control::Perspective => Some("perspective"),
-                    _ => None,
+                    Control::Sprint => Some("sprint"),
+                    Control::Jump => Some("jump"),
+                    Control::Sneak => Some("sneak"),
+                    Control::Attack => Some("attack"),
+                    Control::Use => Some("use"),
+                    Control::Inventory => Some("inventory"),
+                    Control::Offhand => Some("offhand"),
+                    Control::Shield => Some("shield"),
+                    Control::Move => None,
                 };
                 if themed.is_some_and(|name| {
                     theme_button(b, a, name, [x, y, size, size], pressed, color, false)
@@ -873,39 +881,37 @@ pub fn theme_button(
     color: u32,
     frame: bool,
 ) -> bool {
-    let (base, active) = match name {
-        "chat" => (
-            "gui/horizon/touch/chat_normal",
-            "gui/horizon/touch/chat_pressed",
-        ),
-        "pause" => (
-            "gui/horizon/touch/pause_normal",
-            "gui/horizon/touch/pause_pressed",
-        ),
-        "settings" => (
-            "gui/horizon/touch/settings_normal",
-            "gui/horizon/touch/settings_pressed",
-        ),
-        "debug" => (
-            "gui/horizon/touch/debug_normal",
-            "gui/horizon/touch/debug_pressed",
-        ),
-        "perspective" => (
-            "gui/horizon/touch/perspective_normal",
-            "gui/horizon/touch/perspective_pressed",
-        ),
-        "button" => (
-            "gui/horizon/touch/button_normal",
-            "gui/horizon/touch/button_pressed",
-        ),
-        _ => return false,
-    };
-    let key = if pressed && a.sprites.contains_key(active) {
-        active
+    // Tropicalia: every control can be themed, so the launcher's control editor
+    // drives the same artwork here and in the Java engine.
+    const THEMED: [&str; 16] = [
+        "chat",
+        "pause",
+        "settings",
+        "debug",
+        "perspective",
+        "button",
+        "sprint",
+        "jump",
+        "sneak",
+        "attack",
+        "use",
+        "inventory",
+        "offhand",
+        "shield",
+        "joystick_frame",
+        "joystick_knob",
+    ];
+    if !THEMED.contains(&name) {
+        return false;
+    }
+    let base = format!("gui/horizon/touch/{name}_normal");
+    let active = format!("gui/horizon/touch/{name}_pressed");
+    let key = if pressed && a.sprites.contains_key(&active) {
+        &active
     } else {
-        base
+        &base
     };
-    let Some(rect) = a.sprites.get(key).copied() else {
+    let Some(rect) = a.sprites.get(key.as_str()).copied() else {
         return false;
     };
     let [x, y, w, h] = bounds;

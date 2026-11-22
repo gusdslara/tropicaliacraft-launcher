@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.22.1)
 
 # ------ MojoExec ------
 
-add_subdirectory(mojoexec)
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../../../mojoexec" "${CMAKE_CURRENT_BINARY_DIR}/mojoexec")
 
 # ------   GLFW   ------
 
@@ -15,7 +15,7 @@ set(GLFW_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(GLFW_INSTALL        OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS   ON  CACHE BOOL "" FORCE)
 
-add_subdirectory(glfw)
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../../../glfw" "${CMAKE_CURRENT_BINARY_DIR}/glfw")
 
 target_compile_options(glfw PRIVATE -Wno-nullability-completeness)
 
@@ -29,7 +29,7 @@ set(SDL_CAMERA		 OFF CACHE BOOL "" FORCE)
 set(SDL_TESTS		 OFF CACHE BOOL "" FORCE)
 set(SDL_EXAMPLES	 OFF CACHE BOOL "" FORCE)
 set(SDL3_MAINPROJECT OFF CACHE BOOL "" FORCE)
-add_subdirectory(sdl)
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../../../sdl" "${CMAKE_CURRENT_BINARY_DIR}/sdl")
 target_link_libraries(SDL3-shared PRIVATE mojoexec)
 
 # ----------------------

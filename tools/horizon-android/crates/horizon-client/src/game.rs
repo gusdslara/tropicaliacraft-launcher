@@ -20367,7 +20367,8 @@ impl ApplicationHandler for App {
                         .as_ref()
                         .is_some_and(|r| r.info.backend == wgpu::Backend::Gl)
                     && (!loading.menu.needs_world_renderer() || !loading.menu.entry_presented);
-                match if loading.menu.reload_packs
+                match if horizon_client::ui_theme::boot_elapsed() < 2.8
+                    || loading.menu.reload_packs
                     || loading.renderer_job.is_some()
                     || defer_gles_world
                 {

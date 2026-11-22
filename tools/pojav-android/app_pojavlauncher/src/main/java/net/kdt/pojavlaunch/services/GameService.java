@@ -34,6 +34,7 @@ public class GameService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         if(intent != null && intent.getBooleanExtra("kill", false)) {
             stopSelf();
+            com.tropicaliacraft.launcher.MainActivity.reportGameState("tropicalia-game-exit.json", 0);
             Process.killProcess(Process.myPid());
             return START_NOT_STICKY;
         }

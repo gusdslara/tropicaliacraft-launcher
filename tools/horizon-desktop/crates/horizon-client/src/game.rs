@@ -21095,7 +21095,10 @@ impl ApplicationHandler for App {
                     event_loop.exit();
                     return;
                 }
-                match if loading.menu.reload_packs || !loading.ready_for_handoff() {
+                match if horizon_client::ui_theme::boot_elapsed() < 2.8
+                    || loading.menu.reload_packs
+                    || !loading.ready_for_handoff()
+                {
                     None
                 } else {
                     loading.loaded.take()

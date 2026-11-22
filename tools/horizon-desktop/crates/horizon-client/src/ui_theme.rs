@@ -114,6 +114,7 @@ impl Fonts {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Key {
+    Brand(bool),
     Glyph(Face, u16, u16),
     /// A quarter disc (`false`) or a 1px quarter ring of this radius in pixels.
     Corner(u16, bool),
@@ -208,6 +209,45 @@ impl Cache {
             w,
             h,
         })
+    }
+    fn brand(&mut self, atlas: &HudAtlas, logo: bool) -> Option<Rect> {
+        let key = Key::Brand(logo);
+        if let Some(cached) = self.entries.get(&key) {
+            return cached.rect;
+        }
+        let bytes: &[u8] = if logo {
+            include_bytes!("branding/logo.png")
+        } else {
+            include_bytes!("branding/creeper.png")
+        };
+        let (w, h, rgba) = crate::hud::decode_bytes(bytes).ok()?;
+        let (x, y, region) = self.place(atlas, w, h)?;
+        let ax = (region.u0 * atlas.width as f32).round() as u32 + x;
+        let ay = (region.v0 * atlas.height as f32).round() as u32 + y;
+        self.pending.push(crate::font::Patch {
+            x: ax,
+            y: ay,
+            width: w,
+            height: h,
+            rgba,
+        });
+        let rect = Rect {
+            u0: ax as f32 / atlas.width as f32,
+            v0: ay as f32 / atlas.height as f32,
+            u1: (ax + w) as f32 / atlas.width as f32,
+            v1: (ay + h) as f32 / atlas.height as f32,
+            w,
+            h,
+        };
+        self.entries.insert(
+            key,
+            Cached {
+                rect: Some(rect),
+                left: 0.0,
+                top: 0.0,
+            },
+        );
+        Some(rect)
     }
     fn glyph(&mut self, atlas: &HudAtlas, face: Face, id: ab_glyph::GlyphId, px: f32) -> Cached {
         let size = (px * 4.0).round() as u16;
@@ -530,6 +570,20 @@ impl<'a> Ui<'a> {
         self.text(face, size, cx - w / 2.0, y, color, text);
     }
 
+    fn brand(&mut self, logo: bool, cx: f32, y: f32, width: f32, alpha: f32) {
+        if let Some(rect) = with_cache(self.atlas, |cache| cache.brand(self.atlas, logo)) {
+            let factor = self.density / self.scale;
+            self.batch.rect_uv(
+                (cx - width / 2.0) * factor,
+                y * factor,
+                width * factor,
+                width * rect.h as f32 / rect.w as f32 * factor,
+                rect,
+                color::with_alpha(BOOT_TEXT, alpha),
+            );
+        }
+    }
+
     // ---- the launcher's components ----
 }
 
@@ -540,12 +594,17 @@ impl<'a> Ui<'a> {
 const BOOT_TEXT: u32 = color::hex(0xFFFFFF, 255);
 const BOOT_LOG: u32 = color::hex(0x9BA1A6, 255);
 
-/// The boot screen while the menu is not ready yet: the wordmark centred on
-/// pure black and the console's last lines at the bottom right, as the
-/// terminal prints them.
-pub fn draw_boot(atlas: &HudAtlas, batch: &mut HudBatch, logs: &[String]) {
-    // Pure black under everything: the frame's panorama (the title artwork
-    // once the bundle is in) must not leak through.
+/// Keep the startup sequence visible even when resources load quickly.
+pub fn boot_elapsed() -> f32 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_secs_f32()
+}
+
+/// A centred logo fades in, holds, and fades out before the loading notice.
+pub fn draw_boot(atlas: &HudAtlas, batch: &mut HudBatch, _logs: &[String]) {
     batch.fill(
         atlas,
         0.0,
@@ -554,25 +613,84 @@ pub fn draw_boot(atlas: &HudAtlas, batch: &mut HudBatch, logs: &[String]) {
         batch.height,
         color::hex(0x000000, 255),
     );
-    wordmark(atlas, batch);
-    draw_boot_log(atlas, batch, logs);
+    let elapsed = boot_elapsed();
+    if elapsed < 2.2 {
+        let linear = (elapsed / 0.65).min((2.2 - elapsed) / 0.65).clamp(0.0, 1.0);
+        let alpha = linear * linear * (3.0 - 2.0 * linear);
+        let mut ui = Ui::new(atlas, batch, (0.0, 0.0));
+        let width = (ui.w * 0.75).min(560.0).min(ui.h * 1.2);
+        ui.brand(
+            true,
+            ui.w / 2.0,
+            (ui.h - width * 234.0 / 500.0) / 2.0,
+            width,
+            alpha,
+        );
+        ui.finish();
+    } else {
+        wordmark(atlas, batch);
+    }
 }
 
-/// The wordmark with its tagline, centred.
+/// The boot message in the language from `options.txt` (the launcher syncs it
+/// there before the game starts); Portuguese when none is set.
+fn boot_lines() -> (&'static str, &'static str) {
+    static LANG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let lang = LANG.get_or_init(|| {
+        std::fs::read_to_string("options.txt")
+            .ok()
+            .and_then(|options| {
+                options.lines().find_map(|line| {
+                    line.strip_prefix("lang:")
+                        .map(|v| v.trim().trim_matches('"').to_ascii_lowercase())
+                })
+            })
+            .unwrap_or_default()
+    });
+    if lang.starts_with("en") {
+        (
+            "Loading the game...",
+            "Please wait, this can take a moment.",
+        )
+    } else if lang.starts_with("es") {
+        (
+            "Cargando el juego...",
+            "Espera, esto puede tardar unos momentos.",
+        )
+    } else {
+        (
+            "Carregando o jogo...",
+            "Aguarde, isso pode levar alguns instantes.",
+        )
+    }
+}
+
+/// Transparent creeper above the existing translated loading message.
 fn wordmark(atlas: &HudAtlas, batch: &mut HudBatch) {
+    let (title, hint) = boot_lines();
     let mut ui = Ui::new(atlas, batch, (0.0, 0.0));
-    let size = (ui.w / 16.0).clamp(DISPLAY, 96.0);
-    let small = (size * 0.25).clamp(MICRO, 18.0);
-    let block = size * 1.45 + small * 0.6 + small * 1.5;
+    let size = (ui.w / 40.0).clamp(MICRO * 1.4, 40.0);
+    let small = (size * 0.6).clamp(MICRO, 22.0);
+    let icon_h = (ui.h * 0.22).clamp(48.0, 120.0);
+    let gap = 16.0;
+    let block = icon_h + gap + size * 1.45 + small * 0.6 + small * 1.5;
     let top = (ui.h - block) / 2.0;
-    ui.text_centered(Face::SemiBold, size, ui.w / 2.0, top, BOOT_TEXT, "Horizon");
+    ui.brand(false, ui.w / 2.0, top, icon_h * 2.0 / 3.0, 1.0);
     ui.text_centered(
-        Face::Mono,
+        Face::SemiBold,
+        size,
+        ui.w / 2.0,
+        top + icon_h + gap,
+        BOOT_TEXT,
+        title,
+    );
+    ui.text_centered(
+        Face::Regular,
         small,
         ui.w / 2.0,
-        top + size * 1.45 + small * 0.6,
+        top + icon_h + gap + size * 1.45 + small * 0.6,
         BOOT_LOG,
-        "Rust based minecraft client",
+        hint,
     );
     ui.finish();
 }
@@ -693,7 +811,15 @@ mod tests {
         reset_atlas();
         let atlas = HudAtlas::boot();
         let mut batch = HudBatch::new([1280, 720]);
-        draw_boot(&atlas, &mut batch, &[]);
+        batch.fill(
+            &atlas,
+            0.0,
+            0.0,
+            batch.width,
+            batch.height,
+            color::hex(0x000000, 255),
+        );
+        wordmark(&atlas, &mut batch);
         // The first quad is the pure black backdrop over the frame's panorama.
         let (w, h) = (batch.width, batch.height);
         let bg = &batch.vertices[..6];

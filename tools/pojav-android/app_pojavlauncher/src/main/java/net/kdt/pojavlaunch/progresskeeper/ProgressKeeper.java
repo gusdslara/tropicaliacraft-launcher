@@ -11,6 +11,7 @@ public class ProgressKeeper {
     private static final List<TaskCountListener> sTaskCountListeners = new ArrayList<>();
 
     public static synchronized void submitProgress(String progressRecord, int progress, int resid, Object... va) {
+        com.tropicaliacraft.launcher.MainActivity.reportProgress(progressRecord, progress, resid, va);
         ProgressState progressState = sProgressStates.get(progressRecord);
         boolean shouldCallStarted = progressState == null;
         boolean shouldCallEnded = resid == -1 && progress == -1;

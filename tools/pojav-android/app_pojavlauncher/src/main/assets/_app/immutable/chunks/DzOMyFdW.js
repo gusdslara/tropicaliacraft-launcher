@@ -1,0 +1,1 @@
+import{invoke as e}from"./B3rRT8jI.js";async function t(t,n){await e(`plugin:opener|open_url`,{url:t,with:n})}async function n(t,n){await e(`plugin:opener|open_path`,{path:t,with:n})}export{n as openPath,t as openUrl};

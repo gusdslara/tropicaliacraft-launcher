@@ -128,6 +128,7 @@ public final class Tools {
 
 
     private static @Nullable File getPojavStorageRoot(Context ctx) {
+        if (ctx.getPackageName().startsWith("com.tropicaliacraft.launcher")) return new File(ctx.getApplicationInfo().dataDir);
         if(SDK_INT >= 29) {
             return ctx.getExternalFilesDir(null);
         }
@@ -187,7 +188,7 @@ public final class Tools {
         File pojavStorageRoot = getPojavStorageRoot(ctx);
         if(pojavStorageRoot == null) throw new RuntimeException("Whoops! You have to put the SD into your phone.");
         DIR_GAME_HOME = pojavStorageRoot.getAbsolutePath();
-        DIR_GAME_NEW = DIR_GAME_HOME + "/.minecraft";
+        DIR_GAME_NEW = DIR_GAME_HOME + "/shared";
         DIR_HOME_VERSION = DIR_GAME_NEW + "/versions";
         DIR_HOME_LIBRARY = DIR_GAME_NEW + "/libraries";
         DIR_HOME_CRASH = DIR_GAME_NEW + "/crash-reports";
@@ -916,8 +917,8 @@ public final class Tools {
     }
 
     public static void restartLauncherActivity(Context context){
-        Intent intent = new Intent(context, LauncherActivity.class);
-        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+        Intent intent = new Intent(context, com.tropicaliacraft.launcher.MainActivity.class);
+        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
         context.getApplicationContext().startActivity(intent);
     }
 

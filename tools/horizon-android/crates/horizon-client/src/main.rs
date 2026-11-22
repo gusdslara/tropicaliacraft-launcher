@@ -17,6 +17,9 @@ fn main() {
     std::hint::black_box(&MOD_API_LEVEL);
     horizon_client::telemetry::mark_start();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--install-resources") {
+        std::process::exit(install_resources(&args[1..]));
+    }
     let game_args = args.iter().take_while(|a| *a != "--dedicated");
     let help = game_args
         .clone()
@@ -67,6 +70,54 @@ fn main() {
         });
     }
     logging::flush();
+}
+
+/// `horizon-client --install-resources [--home DIR]`: the Android APK's Java-free
+/// installer on the desktop (TropicaliaCraft all-in-one launcher). Downloads and
+/// verifies the pinned files from Mojang's HTTPS endpoints, unpacks the bundled
+/// `engine-data.zip` from DIR and writes `DIR/.local/horizon-client/<version>`.
+/// One JSON object a line on stdout: `{"stage": N, "stages": 6, "label": ..., "done": D, "total": T}`,
+/// then `{"ready": true}` or `{"error": ...}`. Exit code 0 when ready.
+fn install_resources(args: &[String]) -> i32 {
+    use horizon_client::official_install::{self, InstallStage};
+    let home = args
+        .iter()
+        .skip_while(|a| *a != "--home")
+        .nth(1)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+    let home = std::path::absolute(&home).unwrap_or(home);
+    if official_install::ready(&home) && !args.iter().any(|a| a == "--force") {
+        println!("{}", serde_json::json!({ "ready": true }));
+        return 0;
+    }
+    let result = official_install::install_with_progress(&home, |p| {
+        let stage = InstallStage::ALL
+            .iter()
+            .position(|s| *s == p.stage)
+            .unwrap_or(0);
+        println!(
+            "{}",
+            serde_json::json!({
+                "stage": stage,
+                "stages": InstallStage::ALL.len(),
+                "label": p.stage.label(),
+                "done": p.done,
+                "total": p.total,
+            })
+        );
+    });
+    match result {
+        Ok(()) => {
+            let _ = official_install::cleanup_download_cache(&home);
+            println!("{}", serde_json::json!({ "ready": true }));
+            0
+        }
+        Err(error) => {
+            println!("{}", serde_json::json!({ "error": error.to_string() }));
+            1
+        }
+    }
 }
 
 /// The JVM raises its open-file limit to the hard limit as it starts

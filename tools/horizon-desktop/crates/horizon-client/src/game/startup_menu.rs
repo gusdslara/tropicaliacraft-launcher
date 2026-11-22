@@ -1147,6 +1147,14 @@ impl Loading {
     }
 
     pub(super) fn draw_menu(&mut self, batch: &mut HudBatch) {
+        if horizon_client::ui_theme::boot_elapsed() < 2.8 {
+            horizon_client::ui_theme::draw_boot(
+                self.gui.as_ref().map_or(&self.boot, |gui| &gui.atlas),
+                batch,
+                &[],
+            );
+            return;
+        }
         let logs = horizon_client::logging::recent_lines();
         let Some(gui) = &self.gui else {
             // The pack's screens do not exist yet: the boot screen holds the

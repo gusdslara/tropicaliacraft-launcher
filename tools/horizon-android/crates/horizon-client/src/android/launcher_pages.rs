@@ -257,99 +257,68 @@ impl Launcher {
             } else if w < 700.0 {
                 24.0
             } else {
-                32.0
+                30.0
             },
             32.0,
-            if w < 700.0 { 12.0 } else { 28.0 },
+            if w < 700.0 { 16.0 } else { 28.0 },
             color::TEXT,
-            &format!("Horizon Android {}", crate::backend::VERSION),
+            "TropicaliaCraft",
         );
-        button(
-            &mut ui,
-            &mut self.targets,
-            [
-                if w < 700.0 { 32.0 } else { w - 320.0 },
-                if w < 700.0 { 47.0 } else { 24.0 },
-                if w < 700.0 { w - 64.0 } else { 288.0 },
-                if w < 700.0 { 34.0 } else { 46.0 },
-            ],
-            &self.login.status(&self.catalog.config.name),
-            Action::Account,
-            self.login.signed_in,
-        );
-        let tabs = Page::ALL.len() as f32;
-        let tab_margin = if w < 700.0 { 16.0 } else { 32.0 };
-        let tab_width = (w - 2.0 * tab_margin) / tabs;
-        for (i, page) in Page::ALL.iter().enumerate() {
-            let x = tab_margin + i as f32 * tab_width;
-            button(
-                &mut ui,
-                &mut self.targets,
-                [x, 88.0, tab_width - 4.0, 42.0],
-                if w < 700.0 {
-                    match page {
-                        Page::Installed => "Files",
-                        Page::Settings => "Setup",
-                        _ => page.name(),
-                    }
-                } else {
-                    page.name()
-                },
-                Action::Page(*page),
-                *page == self.catalog.page,
-            );
-        }
         let compact = w < 700.0;
-        let page = self.catalog.page;
+        let page = Page::Play;
         if page == Page::Play {
             use horizon_client::official_install::InstallStage;
             let installed = horizon_client::official_install::ready(&self.home);
             let installing = self.worker.is_some();
             let progress = *self.install.lock().unwrap();
-            let top = 160.0;
+            let top = if compact { 68.0 } else { 96.0 };
             ui.text(
                 Face::Medium,
-                32.0,
+                if compact { 24.0 } else { 30.0 },
                 32.0,
                 top,
                 color::TEXT,
                 if installing {
-                    "Getting your game ready"
+                    "Preparando o Minecraft 26.3 (Motor Rust)..."
                 } else if installed {
-                    "Ready to play"
+                    "Iniciando o Minecraft 26.3..."
                 } else {
-                    if compact {
-                        "Your Java worlds"
-                    } else {
-                        "Your Java worlds, on Android"
-                    }
+                    "Baixando recursos oficiais do Minecraft 26.3"
                 },
             );
             ui.text(
                 Face::Regular,
-                17.0,
+                16.0,
                 32.0,
-                top + 47.0,
+                top + 42.0,
                 color::MUTED,
-                &format!("Minecraft 26.3  /  Profile {}", self.catalog.config.profile),
+                &format!("Jogador: {}  •  Minecraft 26.3 (Vulkan)", self.catalog.config.name),
             );
             if installing {
                 let current = InstallStage::ALL
                     .iter()
                     .position(|s| *s == progress.stage)
                     .unwrap_or(0);
-                let row_height = ((h - 360.0) / 6.0).clamp(25.0, 40.0);
-                if h >= 620.0 {
+                let stage_pt = |s: InstallStage| match s {
+                    InstallStage::Metadata => "Consultando manifesto oficial da Mojang",
+                    InstallStage::Download => "Baixando texturas, sons e pacotes do Minecraft 26.3",
+                    InstallStage::Extract => "Extraindo recursos e modelos 3D",
+                    InstallStage::WorldData => "Compilando tabelas de geracao de mundo",
+                    InstallStage::Controls => "Configurando controles de toque e HUD",
+                    InstallStage::Finalize => "Finalizando instalacao para iniciar o jogo",
+                };
+                let row_height = ((h - 280.0) / 6.0).clamp(24.0, 38.0);
+                if h >= 520.0 {
                     for (index, stage) in InstallStage::ALL.iter().enumerate() {
-                        let y = top + 90.0 + index as f32 * row_height;
+                        let y = top + 84.0 + index as f32 * row_height;
                         let label = if index < current {
-                            format!("{:02}  {}  - done", index + 1, stage.label())
+                            format!("{:02}  {}  - concluido", index + 1, stage_pt(*stage))
                         } else {
-                            format!("{:02}  {}", index + 1, stage.label())
+                            format!("{:02}  {}", index + 1, stage_pt(*stage))
                         };
                         ui.text(
                             Face::Regular,
-                            16.0,
+                            15.5,
                             32.0,
                             y,
                             if index == current {
@@ -365,17 +334,17 @@ impl Launcher {
                         Face::Regular,
                         18.0,
                         32.0,
-                        top + 100.0,
+                        top + 92.0,
                         color::TEXT,
-                        progress.stage.label(),
+                        stage_pt(progress.stage),
                     );
                     ui.text(
                         Face::Regular,
                         15.0,
                         32.0,
-                        top + 138.0,
+                        top + 128.0,
                         color::MUTED,
-                        &format!("Step {} of 6", current + 1),
+                        &format!("Etapa {} de 6", current + 1),
                     );
                 }
                 let fraction = if progress.total > 0 {
@@ -384,51 +353,43 @@ impl Launcher {
                     0.0
                 };
                 let overall = (current as f32 + fraction.clamp(0.0, 1.0)) / 6.0;
-                let bar_y = h - 152.0;
-                ui.rounded(32.0, bar_y, w - 64.0, 4.0, 2.0, color::RAISED);
+                let bar_y = h - 130.0;
+                ui.rounded(32.0, bar_y, w - 64.0, 6.0, 3.0, color::RAISED);
                 if overall > 0.0 {
-                    ui.rounded(32.0, bar_y, (w - 64.0) * overall, 4.0, 2.0, color::ACCENT);
+                    ui.rounded(32.0, bar_y, (w - 64.0) * overall, 6.0, 3.0, color::ACCENT);
                 }
                 let detail = match progress.stage {
                     InstallStage::Download => format!(
-                        "{:.1} / {:.1} MiB  - verified downloads",
+                        "{:.1} / {:.1} MiB  - baixando arquivos verificados da Mojang",
                         progress.done as f64 / 1048576.0,
                         progress.total as f64 / 1048576.0
                     ),
                     InstallStage::Controls => format!(
-                        "{} / {} control files verified",
+                        "{} / {} controles verificados",
                         progress.done, progress.total
                     ),
-                    _ => "Please keep Horizon open. Downloaded files are kept for retry.".into(),
+                    _ => "Aguarde. O jogo abrira automaticamente assim que concluir.".into(),
                 };
                 ui.text(
                     Face::Regular,
                     14.0,
                     32.0,
-                    bar_y + 12.0,
+                    bar_y + 14.0,
                     color::MUTED,
                     &detail,
                 );
             } else {
-                let rows = if installed {
-                    [
-                        "01  Open a world or join a Java server",
-                        "02  Touch setup: Options > Controls",
-                        "03  Find packs and .hmod in the tabs",
-                    ]
-                } else {
-                    [
-                        "01  Download resources from Mojang",
-                        "02  Install and verify on this phone",
-                        "03  Play offline or sign in for servers",
-                    ]
-                };
+                let rows = [
+                    "01  Baixando recursos oficiais da Mojang",
+                    "02  Sincronizando mods (.hmod) e idioma Portugues (pt_br)",
+                    "03  Abrindo direto no menu principal do Minecraft 26.3",
+                ];
                 for (index, line) in rows.iter().enumerate() {
                     ui.text(
                         Face::Regular,
-                        17.0,
+                        16.5,
                         32.0,
-                        top + 100.0 + index as f32 * 42.0,
+                        top + 92.0 + index as f32 * 38.0,
                         color::MUTED,
                         line,
                     );
@@ -437,11 +398,20 @@ impl Launcher {
             if installing {
                 ui.text(
                     Face::Medium,
-                    19.0,
+                    18.0,
                     32.0,
-                    h - 90.0,
+                    h - 76.0,
                     color::TEXT,
-                    progress.stage.label(),
+                    &format!("Progresso: {:.0}%", ((InstallStage::ALL.iter().position(|s| *s == progress.stage).unwrap_or(0) as f32 + if progress.total > 0 { (progress.done as f32 / progress.total as f32).clamp(0.0, 1.0) } else { 0.0 }) / 6.0) * 100.0),
+                );
+            } else if self.error.is_some() {
+                button(
+                    &mut ui,
+                    &mut self.targets,
+                    [32.0, h - 100.0, 320.0, 60.0],
+                    "Tentar novamente",
+                    Action::Play,
+                    true,
                 );
             } else {
                 button(
@@ -449,11 +419,9 @@ impl Launcher {
                     &mut self.targets,
                     [32.0, h - 100.0, 320.0, 60.0],
                     if installed {
-                        "Play"
-                    } else if self.error.is_some() {
-                        "Retry installation"
+                        "Iniciar Jogo"
                     } else {
-                        "Download Minecraft 26.3"
+                        "Baixar e Jogar"
                     },
                     Action::Play,
                     true,

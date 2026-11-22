@@ -166,30 +166,10 @@ impl Launcher {
         horizon_client::ui_theme::reset_atlas();
         self.cursor = (0.0, 0.0);
         self.drag = None;
-        self.chooser = None;
-        self.exit_confirmation = false;
-        self.focus = None;
-        self.pending_focus = None;
-        if let Err(error) = std::env::set_current_dir(&self.home) {
-            self.fail(error);
-            return;
-        }
-        horizon_client::android_runtime::clear_gamepads();
-        self.controller_edges = Default::default();
-        self.controller_repeat = None;
-        self.catalog.config.input_host = horizon_client::android_runtime::input_mode();
-        self.catalog.refresh(&self.home);
-        self.login.refresh_status();
-        crate::diagnostics::heartbeat("returned_to_launcher", || serde_json::json!({}));
-        self.catalog.page = Page::Play;
-        if let Ok(message) = std::fs::read_to_string(self.home.join("android-error.txt")) {
-            self.error = Some(message);
-        }
-        if let Err(error) = self.open(events) {
-            self.fail(error);
-            events.exit();
-        }
+        log::info!("Tropicalia: Game ended. Exiting HorizonActivity to return to TropicaliaCraft UI.");
+        events.exit();
     }
+
     pub(super) fn configure_screen(&self) {
         crate::native_ime::configure_screen(
             self.catalog.config.screen.immersive,
@@ -207,44 +187,8 @@ impl Launcher {
     }
 
     fn open(&mut self, events: &ActiveEventLoop) -> Result<()> {
-        crate::platform::set_orientation(self.catalog.config.orientation);
-        self.configure_screen();
-        crate::display::set_scale(self.catalog.config.render_scale);
-        horizon_client::android_runtime::configure_gpu(false);
-        if let Some(renderer) = &mut self.renderer {
-            if let Some(size) = crate::display::prepare(self.window.as_ref().unwrap())? {
-                renderer.resize(size[0], size[1]);
-            }
-            renderer.recreate_surface()?;
-            let size = self.window.as_ref().unwrap().inner_size();
-            renderer.resize(size.width, size.height);
-            return Ok(());
-        }
-        let window = Arc::new(
-            events.create_window(Window::default_attributes().with_title("Horizon Android"))?,
-        );
-        crate::display::prepare(&window)?;
-        let gui = game::UiResources {
-            atlas: HudAtlas::build(&self.home.join("installer"))?,
-            panorama: Arc::new(horizon_client::gfx::panorama::Faces {
-                size: 1,
-                pixels: [0u8; 4].repeat(6),
-            }),
-        };
-        self.renderer = Some(game::loading_renderer(
-            window.clone(),
-            false,
-            Some(&gui.atlas),
-            Some(gui.panorama.as_ref()),
-            None,
-            if self.catalog.config.renderer == crate::catalog::RendererMode::OpenGl {
-                horizon_client::graphics::GraphicsApi::OpenGl
-            } else {
-                horizon_client::graphics::GraphicsApi::Auto
-            },
-        )?);
-        self.window = Some(window);
-        self.gui = Some(gui);
+        log::info!("Tropicalia: Horizon legacy launcher UI bypass - exiting back to TropicaliaCraft UI.");
+        events.exit();
         Ok(())
     }
 
@@ -386,13 +330,23 @@ impl Launcher {
             horizon_client::android_runtime::clear_gamepads();
             self.controller_edges = Default::default();
             self.controller_repeat = None;
+            let session_file = self.prepared_session.take().or_else(|| {
+                self.catalog
+                    .config
+                    .session_file
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from)
+                    .filter(|p| p.is_file())
+            });
             let request = crate::game_launch::LaunchRequest {
                 resources: self
                     .home
                     .join(".local/horizon-client")
                     .join(horizon_core::VANILLA_VERSION),
                 game_home,
-                session_file: self.prepared_session.take(),
+                session_file,
                 offline_name: crate::catalog::truncate_player_name(&self.catalog.config.name),
                 server: self.catalog.config.server.clone(),
                 control_socket: (!crate::PUBLIC_BUILD).then(|| self.home.join("control.json")),
@@ -447,16 +401,82 @@ impl Launcher {
     }
 }
 
+/// The TropicaliaCraft launcher runs in another process, so it hands the Skin
+/// Studio's active skin over in `android-launcher.json` (`offline_skin`, a PNG
+/// path, and `offline_skin_model`). Exported as the desktop launcher's
+/// `HORIZON_OFFLINE_SKIN` variables before the game first reads them.
+fn export_offline_skin(home: &std::path::Path) {
+    let config = std::fs::read(home.join("android-launcher.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+    let path = config
+        .as_ref()
+        .and_then(|c| c.get("offline_skin")?.as_str())
+        .filter(|p| !p.is_empty() && std::path::Path::new(p).is_file());
+    let model = config
+        .as_ref()
+        .and_then(|c| c.get("offline_skin_model")?.as_str())
+        .unwrap_or("classic");
+    // SAFETY: called on the main thread at resume, before the game thread starts.
+    unsafe {
+        match path {
+            Some(path) => {
+                std::env::set_var("HORIZON_OFFLINE_SKIN", path);
+                std::env::set_var("HORIZON_OFFLINE_SKIN_MODEL", model);
+            }
+            None => {
+                std::env::remove_var("HORIZON_OFFLINE_SKIN");
+                std::env::remove_var("HORIZON_OFFLINE_SKIN_MODEL");
+            }
+        }
+    }
+}
+
 impl ApplicationHandler for Launcher {
     fn resumed(&mut self, events: &ActiveEventLoop) {
         self.configure_screen();
         if let Some(game) = &mut self.game {
             return game.resumed(events);
         }
-        if let Err(error) = self.open(events) {
-            self.fail(error);
-            events.exit();
+        let auto_flag = self.home.join("tropicalia-auto.flag");
+        let _ = std::fs::remove_file(&auto_flag);
+        export_offline_skin(&self.home);
+
+        // Se os recursos oficiais ainda não estão prontos, verifica se engine-data.zip existe e extrai sincronamente
+        if !horizon_client::official_install::ready(&self.home) {
+            let engine_zip = self.home.join("engine-data.zip");
+            if engine_zip.is_file() {
+                log::info!("Tropicalia: Extraindo engine-data.zip sincronamente...");
+                let hz_ver = self
+                    .home
+                    .join(".local")
+                    .join("horizon-client")
+                    .join(horizon_core::VANILLA_VERSION);
+                let _ = std::fs::create_dir_all(&hz_ver);
+                if let Err(e) = horizon_client::resource_install::extract(&engine_zip, &hz_ver) {
+                    log::error!("Tropicalia: Falha ao extrair engine-data.zip: {e}");
+                }
+                let _ = std::fs::write(hz_ver.join("android-downloads-v2.json"), b"{\"schema\":2}\n");
+                let _ = std::fs::write(hz_ver.join("audio-complete.json"), b"{}\n");
+            }
         }
+
+        if horizon_client::official_install::ready(&self.home) && self.error.is_none() {
+            crate::platform::set_orientation(self.catalog.config.orientation);
+            crate::display::set_scale(self.catalog.config.render_scale);
+            if let Err(error) = self.action(events) {
+                log::error!("Tropicalia: Falha ao iniciar jogo no Horizon: {error}");
+                self.fail(error);
+                events.exit();
+                return;
+            } else if self.game.is_some() {
+                return;
+            }
+        }
+
+        // Se não conseguiu iniciar o jogo direto, NUNCA exibir as abas do Horizon.
+        log::warn!("Tropicalia: Horizon game direct boot completed or exited. Returning to TropicaliaCraft UI.");
+        events.exit();
     }
     fn suspended(&mut self, events: &ActiveEventLoop) {
         crate::diagnostics::heartbeat("suspended", || serde_json::json!({}));
@@ -618,7 +638,11 @@ impl ApplicationHandler for Launcher {
         }
         if let Some(result) = self.worker.as_ref().and_then(|w| w.try_recv().ok()) {
             self.worker = None;
-            if let Err(error) = result {
+            if result.is_ok() {
+                if let Err(error) = self.action(events) {
+                    self.fail(error);
+                }
+            } else if let Err(error) = result {
                 let message = error.to_string();
                 if message.contains("Dns Failed") || message.contains("lookup address") {
                     self.fail("Minecraft download interrupted: DNS could not resolve the download host. Check your connection, VPN or Private DNS, then retry Download. Completed files are kept.");

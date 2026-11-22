@@ -109,7 +109,7 @@ pub fn install(bundle: &Bundle, home: &Path, progress: impl Fn(u64, u64)) -> Res
     result
 }
 
-pub(crate) fn extract(archive: &Path, destination: &Path) -> Result<()> {
+pub fn extract(archive: &Path, destination: &Path) -> Result<()> {
     let mut zip = zip::ZipArchive::new(fs::File::open(archive)?)?;
     let mut total = 0u64;
     for i in 0..zip.len() {

@@ -124,7 +124,15 @@ impl ModList {
             enabled,
             disabled,
             keys,
-            installed: Vec::new(),
+            // The Android title menu exists before Game starts the native hooks.
+            // Its rows must describe the modules compiled into this fixed APK too.
+            installed: if cfg!(target_os = "android") {
+                ANDROID_BUNDLED.into_iter().map(|(id, title, description)| Installed {
+                    id: id.into(), title: title.into(), description: description.into(),
+                    problem: None, dev: false, has_settings: false,
+                    native: Some(NativePage::default()),
+                }).collect()
+            } else { Vec::new() },
         }
     }
     pub fn serialize(&self) -> String {
@@ -187,6 +195,20 @@ impl ModList {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "android")]
+    #[test]
+    fn title_lists_compiled_modules_and_keeps_their_saved_switches() {
+        let mut list = ModList::parse("mod.zoom:true\nmod.minimap:false\n");
+        assert_eq!(list.installed.len(), 4);
+        assert!(list.is_on(0));
+        assert!(!list.is_on(1));
+        assert!(!list.is_on(2));
+        list.toggle(1);
+        let restored = ModList::parse(&list.serialize());
+        assert!(restored.is_on(1));
+        assert!(restored.installed.iter().all(|m| m.native.is_some() && m.problem.is_none()));
+    }
+
     #[test]
     fn round_trips_and_ignores_the_rest() {
         let list = ModList::parse("mod.coords_hud:true\nmod.other:false\nzoom:true\n");
@@ -238,7 +260,11 @@ mod tests {
         list.toggle(2);
         assert!(!list.is_on(2));
         assert_eq!(list.serialize(), "mod.c:false\n");
-        assert_eq!(ModList::parse(&list.serialize()).disabled, list.disabled);
+        let mut expected_disabled = BTreeSet::from(["c".to_owned()]);
+        if cfg!(target_os = "android") {
+            expected_disabled.extend(["zoom", "minimap", "recipes", "smartf3"].map(str::to_owned));
+        }
+        assert_eq!(ModList::parse(&list.serialize()).disabled, expected_disabled);
         list.toggle(2);
         assert!(list.is_on(2));
         assert_eq!(list.serialize(), "mod.c:true\n");

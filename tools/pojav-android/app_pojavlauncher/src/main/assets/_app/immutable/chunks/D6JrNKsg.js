@@ -1,0 +1,1 @@
+import{invoke as e}from"./B3rRT8jI.js";async function t(t={}){return typeof t==`object`&&Object.freeze(t),await e(`plugin:dialog|save`,{options:t})}export{t as save};

@@ -206,11 +206,8 @@ public class GameRunner {
             };
 
 
-                if (LifecycleAwareAlertDialog.haltOnDialog(activity.getLifecycle(), activity, dialogCreator)) {
-                    return; // If the dialog's lifecycle has ended, return without
-                    // actually launching the game, thus giving us the opportunity
-                    // to start after the activity is shown again
-                }
+                com.tropicaliacraft.launcher.RamNotice.show(activity, finalDeviceMemory,
+                        LauncherPreferences.PREF_RAM_ALLOCATION, showAddressMemoryWarning);
             }
         File gamedir = instance.getGameDirectory();
         JVersionList.Version versionInfo = Tools.getVersionInfo(versionId);
@@ -225,7 +222,8 @@ public class GameRunner {
             switchRendererIfSupported(true, GameRenderer.getKnownRenderer(Renderers.GL4ES_RENDERER), gameRenderer, instance, activity, 0);
         }
 
-        boolean isGl4es = renderer instanceof GLESRenderSpec.GL4ESRenderSpec;
+        boolean isGl4es = renderer instanceof GLESRenderSpec.GL4ESRenderSpec
+                && !LauncherPreferences.DEFAULT_PREF.getBoolean("tropicaliaNativeVulkan", false);
         RenderSpec ltw = GameRenderer.getKnownRenderer(Renderers.LTW_RENDERER);
         boolean ltwSupported = ltw != null && ltw.compatibleDevice(activity);
         // Block Sodium from running with GL4ES on 1.17+
@@ -332,7 +330,7 @@ public class GameRunner {
 
         activity.runOnUiThread(() -> Toast.makeText(activity, activity.getString(R.string.autoram_info_msg,LauncherPreferences.PREF_RAM_ALLOCATION), Toast.LENGTH_SHORT).show());
 
-        Log.i("GameRunner", "Running with "+ launchArgs.toString());
+        Log.i("GameRunner", "Starting Minecraft " + versionId);
 
         String mainClass = versionInfo.mainClass;
 
@@ -348,6 +346,7 @@ public class GameRunner {
             }
         }
 
+        com.tropicaliacraft.launcher.MainActivity.reportGameState("tropicalia-game-exit.json", 0);
         Tools.restartLauncherActivity(activity);
         Tools.fullyExit();
     }

@@ -1,0 +1,1 @@
+import"./xihTtKlq.js";import{G as e,N as t,T as n,Y as r,ft as i,j as a,o,x as s}from"./BewvfyvB.js";var c=t(`<span><!></span>`);function l(t,l){let u=o(l,`tone`,3,`muted`),d=o(l,`pixel`,3,!1);var f=c();let p;var m=r(f);n(m,()=>l.children),i(f),e(()=>p=s(f,1,`badge ${u()??``}`,`svelte-dtbgkf`,p,{pixel:d()})),a(t,f)}export{l as t};

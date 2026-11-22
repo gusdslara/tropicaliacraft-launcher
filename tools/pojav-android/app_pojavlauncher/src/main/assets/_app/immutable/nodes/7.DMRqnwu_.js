@@ -1,0 +1,1 @@
+import"../chunks/xihTtKlq.js";import"../chunks/B2m8qavK.js";import{V as e,ct as t,l as n,rt as r,st as i}from"../chunks/Dl1s5CKN.js";import{t as a}from"../chunks/C1SKdaqS.js";import{t as o}from"../chunks/CiirQJri.js";function s(s,c){t(c,!1),n();{let t=r(()=>a.url.searchParams.get(`id`));o(s,{get initialId(){return e(t)}})}i()}export{s as component};

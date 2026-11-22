@@ -326,6 +326,7 @@ public class GameActivity extends BaseActivity implements ControlButtonMenuListe
         mDrawerPullButton = findViewById(R.id.drawer_button);
         mHotbarView = findViewById(R.id.hotbar_view);
         mLoadingScreen = findViewById(R.id.main_loading_screen);
+        com.tropicaliacraft.launcher.LoadingText.apply(mLoadingScreen);
     }
 
     @Override
@@ -535,8 +536,10 @@ public class GameActivity extends BaseActivity implements ControlButtonMenuListe
     }
 
     public void hideLoadingScreen(){
+        com.tropicaliacraft.launcher.MainActivity.reportGameState("tropicalia-game-status.json", 0);
         if(mLoadingScreen == null) return;
-        ((TextView) mLoadingScreen.findViewById(R.id.main_loading_screen_text)).setText(getString(R.string.loading_screen_booted, PLATFORM.backendName()));
+        if(com.tropicaliacraft.launcher.LoadingText.deferHide(mLoadingScreen, this::hideLoadingScreen)) return;
+        ((TextView) mLoadingScreen.findViewById(R.id.main_loading_screen_text)).setText(com.tropicaliacraft.launcher.LoadingText.ready());
         mLoadingScreen.animate()
                 .alpha(0f)
                 .setDuration(300)

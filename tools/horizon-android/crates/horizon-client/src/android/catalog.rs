@@ -58,6 +58,8 @@ pub struct Config {
     pub proxy: Option<String>,
     pub name: String,
     pub server: String,
+    pub game_dir: Option<String>,
+    pub session_file: Option<String>,
     #[serde(skip)]
     pub microsoft_client_id: String,
     pub renderer: RendererMode,
@@ -158,6 +160,15 @@ impl Config {
         }
     }
     pub fn game_home(&self, home: &Path) -> PathBuf {
+        if let Some(dir) = &self.game_dir {
+            let trimmed = dir.trim();
+            if !trimmed.is_empty() {
+                let path = PathBuf::from(trimmed);
+                if path.is_absolute() {
+                    return path;
+                }
+            }
+        }
         // Legacy modpack selections are ignored; their files remain untouched.
         self.profile_home(home)
     }

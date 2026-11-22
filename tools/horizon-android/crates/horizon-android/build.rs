@@ -3,5 +3,6 @@ fn main() {
     // This affects the final ELF only, not code generation or release optimization.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
         println!("cargo:rustc-link-arg=-Wl,--build-id=sha1");
+        println!("cargo:rustc-link-arg=-Wl,-z,max-page-size=16384");
     }
 }
