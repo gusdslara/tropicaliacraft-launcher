@@ -148,6 +148,7 @@ export function loadersFor(kind: ContentKind, loader: ModLoader | 'server-plugin
 }
 
 export interface SearchParams {
+	source?: 'modrinth' | 'curseforge';
 	query: string;
 	kind: ContentKind;
 	loaders?: string[];
@@ -161,6 +162,7 @@ export interface SearchParams {
 }
 
 export async function search(p: SearchParams): Promise<SearchResult> {
+	if (p.source === 'curseforge') return (await import('./curseforge')).search(p);
 	const facets: string[][] = [[`project_type:${p.kind}`]];
 	if (p.loaders?.length) facets.push(p.loaders.map((l) => `categories:${l}`));
 	if (p.gameVersion) facets.push([`versions:${p.gameVersion}`]);
@@ -178,22 +180,33 @@ export async function search(p: SearchParams): Promise<SearchResult> {
 }
 
 export async function projectVersions(projectId: string, loaders: string[], gameVersion?: string) {
+	if (projectId.startsWith('curseforge:')) return (await import('./curseforge')).versions(projectId, loaders, gameVersion);
 	const qs = new URLSearchParams();
 	if (loaders.length) qs.set('loaders', JSON.stringify(loaders));
 	if (gameVersion) qs.set('game_versions', JSON.stringify([gameVersion]));
 	return getJson<ModrinthVersion[]>(`${API}/project/${encodeURIComponent(projectId)}/version?${qs}`);
 }
 
-export function getVersion(versionId: string) {
+export async function getVersion(versionId: string) {
+	if (versionId.startsWith('curseforge:')) return (await import('./curseforge')).getFile(versionId);
 	return getJson<ModrinthVersion>(`${API}/version/${encodeURIComponent(versionId)}`);
 }
 
 export async function getProjects(ids: string[]): Promise<ModrinthProject[]> {
 	if (!ids.length) return [];
+	if (ids.some(id => id.startsWith('curseforge:'))) {
+		const cf = await import('./curseforge');
+		const local = await Promise.all(ids.filter(id => id.startsWith('curseforge:')).map(id => cf.project(id)));
+		return [...local, ...await getProjects(ids.filter(id => !id.startsWith('curseforge:')))];
+	}
 	return getJson<ModrinthProject[]>(`${API}/projects?ids=${encodeURIComponent(JSON.stringify(ids))}`);
 }
 
-export function getProject(idOrSlug: string) {
+export async function getProject(idOrSlug: string) {
+	if (idOrSlug.startsWith('curseforge:')) {
+		const p = await (await import('./curseforge')).project(idOrSlug);
+		return { ...p, body: p.description, gallery: [] as Array<{ url: string }>, game_versions: [] as string[], loaders: [] as string[] };
+	}
 	return getJson<ModrinthProject & { body: string; gallery: Array<{ url: string }>; game_versions: string[]; loaders: string[] }>(
 		`${API}/project/${encodeURIComponent(idOrSlug)}`
 	);
@@ -209,7 +222,9 @@ export function pickBest(versions: ModrinthVersion[]): ModrinthVersion | undefin
 }
 
 export function primaryFile(v: ModrinthVersion): ModrinthFile {
-	return v.files.find((f) => f.primary) ?? v.files[0];
+	const file = v.files.find((f) => f.primary) ?? v.files[0];
+	if (!file) throw new Error(`A versão ${v.id} não disponibiliza arquivo para download.`);
+	return file;
 }
 
 export interface PlannedInstall {
@@ -241,11 +256,15 @@ export async function planInstall(
 	const plan: PlannedInstall[] = [];
 	const missing: string[] = [];
 	const seen = new Set<string>(ctx.installed);
+	const compatible = (v: ModrinthVersion) =>
+		(!ctx.gameVersion || v.game_versions.includes(ctx.gameVersion)) &&
+		(!ctx.loaders.length || v.loaders.some((l) => ctx.loaders.includes(l)));
 
 	const rootVersion = chosenVersion ?? pickBest(await projectVersions(root.id, ctx.loaders, ctx.gameVersion));
 	if (!rootVersion) {
 		throw new Error(`"${root.title}" não tem versão para ${ctx.gameVersion ?? 'essa versão'} ${ctx.loaders.join('/')}`);
 	}
+	if (!compatible(rootVersion)) throw new Error(`"${root.title}" é incompatível com a versão ou modloader da instância.`);
 	seen.add(root.id);
 	plan.push({ project: root, version: rootVersion, file: primaryFile(rootVersion), root: true });
 
@@ -254,18 +273,29 @@ export async function planInstall(
 		const { version, parent } = queue.shift()!;
 		const deps = version.dependencies.filter((d) => d.dependency_type === 'required');
 		for (const dep of deps) {
-			if (dep.project_id && seen.has(dep.project_id)) continue;
+			if (dep.project_id && seen.has(dep.project_id) && !dep.version_id) continue;
 			let depVersion: ModrinthVersion | undefined;
 			if (dep.version_id) {
 				depVersion = await getVersion(dep.version_id).catch(() => undefined);
 			}
-			if (!depVersion && dep.project_id) {
+			if (!depVersion && !dep.version_id && dep.project_id) {
 				depVersion = pickBest(await projectVersions(dep.project_id, ctx.loaders, ctx.gameVersion).catch(() => []));
 			}
 			const pid = depVersion?.project_id ?? dep.project_id;
-			if (!pid || seen.has(pid)) continue;
+			if (!pid) {
+				missing.push(dep.file_name ?? dep.version_id ?? 'Dependência sem identificação');
+				continue;
+			}
+			if (seen.has(pid)) {
+				const selected = plan.find((p) => p.project.id === pid);
+				if (selected) {
+					if (dep.version_id && selected.version.id !== dep.version_id) missing.push(`${pid} (${dep.version_id})`);
+					continue;
+				}
+				if (!dep.version_id) continue;
+			}
 			seen.add(pid);
-			if (!depVersion) {
+			if (!depVersion || !compatible(depVersion)) {
 				missing.push(dep.file_name ?? pid);
 				continue;
 			}
@@ -277,6 +307,16 @@ export async function planInstall(
 				dependencyOf: parent
 			});
 			queue.push({ version: depVersion, parent: pid });
+		}
+	}
+	if (missing.length) {
+		throw new Error(`Dependências obrigatórias indisponíveis ou incompatíveis: ${missing.join(', ')}`);
+	}
+	for (const item of plan) {
+		for (const dep of item.version.dependencies.filter(d => d.dependency_type === 'incompatible')) {
+			if (dep.project_id && (ctx.installed.has(dep.project_id) || plan.some(p => p.project.id === dep.project_id && (!dep.version_id || p.version.id === dep.version_id)))) {
+				throw new Error(`Conflito de mods: ${item.project.title} é incompatível com ${dep.project_id}.`);
+			}
 		}
 	}
 
@@ -321,6 +361,28 @@ export interface BatchInstallTarget {
 	gameVersion: string;
 }
 
+/** Downloads first, then replaces older files from the same project to avoid duplicate mod IDs. */
+export async function applyInstallPlan(plan: PlannedInstall[], kind: ContentKind, target: BatchInstallTarget): Promise<void> {
+	if (isTauri) {
+		await call('content_install', {
+			ownerKind: target.ownerKind, ownerId: target.owner.id, kind,
+			files: plan.map(({ file }) => ({ url: file.url, filename: file.filename, sha1: file.hashes.sha1 || null, size: file.size }))
+		});
+	}
+	for (const item of plan) {
+		const replacement = toInstalled(item, kind);
+		for (const previous of Object.values(target.owner.content)) {
+			if (previous.projectId !== replacement.projectId || previous.filename === replacement.filename) continue;
+			if (isTauri) await call('content_delete', {
+				ownerKind: target.ownerKind, ownerId: target.owner.id,
+				kind: previous.kind, filename: previous.filename
+			});
+			delete target.owner.content[previous.filename];
+		}
+		target.owner.content[replacement.filename] = replacement;
+	}
+}
+
 export async function installProjectsBatch(
 	projects: Array<{ id: string; title: string; iconUrl?: string | null; kind?: ContentKind }>,
 	target: BatchInstallTarget
@@ -330,31 +392,15 @@ export async function installProjectsBatch(
 
 	for (const p of projects) {
 		const kind = p.kind ?? (target.loaders.includes('paper') || target.loaders.includes('spigot') ? 'plugin' : 'mod');
+		const loaders = ['mod', 'plugin', 'modpack'].includes(kind) ? target.loaders : loadersFor(kind, 'vanilla');
 		try {
-			const installed = new Set(Object.values(target.owner.content).map((x) => x.projectId).filter(Boolean) as string[]);
+			const installed = new Set(Object.values(target.owner.content).filter(x => !x.filename.endsWith('.disabled')).map((x) => x.projectId).filter(Boolean) as string[]);
 			const { plan } = await planInstall(
 				{ id: p.id, title: p.title, iconUrl: p.iconUrl },
-				{ kind, loaders: target.loaders, gameVersion: target.gameVersion, installed }
+				{ kind, loaders, gameVersion: target.gameVersion, installed }
 			);
 
-			if (isTauri) {
-				await call('content_install', {
-					ownerKind: target.ownerKind,
-					ownerId: target.owner.id,
-					kind,
-					files: plan.map((item) => ({
-						url: item.file.url,
-						filename: item.file.filename,
-						sha1: item.file.hashes.sha1,
-						size: item.file.size
-					}))
-				});
-			}
-
-			for (const item of plan) {
-				const installedItem = toInstalled(item, kind);
-				target.owner.content[installedItem.filename] = installedItem;
-			}
+			await applyInstallPlan(plan, kind, target);
 			successCount++;
 		} catch (e) {
 			errors.push(`${p.title}: ${errorMessage(e)}`);

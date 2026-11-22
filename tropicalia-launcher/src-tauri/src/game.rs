@@ -47,6 +47,8 @@ pub struct LaunchRequest {
     #[serde(default)]
     pub engine: Option<String>,
     pub game_version: String,
+    #[serde(default)]
+    pub language: Option<String>,
     pub loader: String,
     #[serde(default)]
     pub loader_version: Option<String>,
@@ -186,9 +188,25 @@ async fn ensure_loader(app: &AppHandle, client: &reqwest::Client, shared: &Path,
     match req.loader.as_str() {
         "vanilla" | "" => Ok(mc.to_string()),
         "fabric" | "quilt" => {
-            if loader_version.is_empty() {
-                return Err("Escolha a versão do loader nas configurações da instância".into());
-            }
+            // Perfis criados sem versão de loader usam a mais recente estável para o jogo.
+            let loader_version = if loader_version.is_empty() {
+                download::emit(app, owner, "loader", 0, 1, format!("Escolhendo versão do {}", req.loader));
+                let list_url = if req.loader == "fabric" {
+                    format!("https://meta.fabricmc.net/v2/versions/loader/{mc}")
+                } else {
+                    format!("https://meta.quiltmc.org/v3/versions/loader/{mc}")
+                };
+                let list: Vec<Value> = download::get_json(client, &list_url).await?;
+                let version_of = |v: &Value| v.pointer("/loader/version").and_then(Value::as_str).map(String::from);
+                list.iter()
+                    .find(|v| v.pointer("/loader/stable").and_then(Value::as_bool).unwrap_or(false))
+                    .and_then(version_of)
+                    .or_else(|| list.iter().find_map(|v| version_of(v).filter(|s| !s.contains('-'))))
+                    .or_else(|| list.first().and_then(version_of))
+                    .ok_or_else(|| format!("Nenhuma versão do {} disponível para o Minecraft {mc}", req.loader))?
+            } else {
+                loader_version
+            };
             let (url, prefix) = if req.loader == "fabric" {
                 (format!("https://meta.fabricmc.net/v2/versions/loader/{mc}/{loader_version}/profile/json"), "fabric-loader")
             } else {
@@ -262,6 +280,16 @@ async fn install_forge_like(
     hide_console(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| format!("Falha ao iniciar o instalador: {e}"))?;
     let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let errors = tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        let mut tail = Vec::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            tail.push(line);
+            if tail.len() > 30 { tail.remove(0); }
+        }
+        tail
+    });
     let app2 = app.clone();
     let owner2 = owner.to_string();
     let reader = tokio::spawn(async move {
@@ -277,7 +305,8 @@ async fn install_forge_like(
         tail
     });
     let status = child.wait().await.map_err(|e| e.to_string())?;
-    let tail = reader.await.unwrap_or_default();
+    let mut tail = reader.await.unwrap_or_default();
+    tail.extend(errors.await.unwrap_or_default());
     if !status.success() {
         return Err(format!("O instalador do {} falhou:\n{}", req.loader, tail.join("\n")));
     }
@@ -834,8 +863,9 @@ fn map_to_mc_language(raw: &str) -> &'static str {
     }
 }
 
-fn sync_options_language(game_dir: &Path) {
-    let mc_lang = map_to_mc_language(&detect_system_locale());
+fn sync_options_language(game_dir: &Path, language: Option<&str>) {
+    let system_locale = detect_system_locale();
+    let mc_lang = map_to_mc_language(language.unwrap_or(&system_locale));
     let options_path = game_dir.join("options.txt");
 
     if !options_path.exists() {
@@ -853,7 +883,7 @@ fn sync_options_language(game_dir: &Path) {
             if line.starts_with("lang:") {
                 found = true;
                 let val = line.trim_start_matches("lang:").trim();
-                if val.is_empty() {
+                if val.is_empty() || (language.is_some() && val != mc_lang) {
                     new_lines.push(format!("lang:{mc_lang}"));
                     changed = true;
                 } else {
@@ -884,20 +914,293 @@ fn split_server(addr: &str) -> (String, String) {
     }
 }
 
+#[cfg(target_os = "android")]
+static ANDROID_LAUNCH_GENERATION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
 /// Escreve um @argfile (Java 9+) quando a linha de comando passaria do limite do Windows.
 fn argfile_escape(arg: &str) -> String {
     format!("\"{}\"", arg.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+#[cfg(target_os = "android")]
+async fn launch_java_android(
+    app: &AppHandle, state: &State<'_, AppState>, req: &LaunchRequest,
+    version_id: String, shared: PathBuf, game_dir: PathBuf, version: Value,
+) -> Result<(), String> {
+    let owner = req.instance_id.clone();
+    sync_options_language(&game_dir, req.language.as_deref());
+        download::emit(&app, &owner, "launch", 1, 1, "Iniciando Minecraft no Android…");
+        let root = paths::root(&app)?;
+        let _ = std::fs::remove_file(root.join("tropicalia-game-exit.json"));
+        let _ = std::fs::remove_file(root.join("tropicalia-game-status.json"));
+        let _ = std::fs::remove_file(root.join("tropicalia-game-starting.json"));
+        let _ = std::fs::remove_file(root.join("tropicalia-progress.json"));
+        let _ = std::fs::remove_file(root.join("tropicalia-game-kill.json"));
+
+        let launch_payload = json!({
+            "instanceId": owner,
+            "versionId": version_id,
+            "gameVersion": req.game_version,
+            "gameDir": game_dir.to_string_lossy().to_string(),
+            "username": req.account.username,
+            "uuid": req.account.uuid,
+            "accessToken": req.account.access_token,
+            "userType": req.account.user_type,
+            "memoryMb": req.memory_max_mb.max(1024),
+            "memoryMinMb": req.memory_min_mb,
+            "jvmArgs": req.jvm_args.join(" "),
+            "serverAddress": req.server_address,
+            "javaRenderer": req.java_renderer,
+            "useAngle": req.use_angle.unwrap_or(false),
+            "javaRuntime": req.java_runtime,
+            "javaMajorVersion": version.pointer("/javaVersion/majorVersion").and_then(Value::as_u64).unwrap_or(8),
+            "language": req.language,
+            "sharedDir": shared.to_string_lossy().to_string(),
+            "xuid": req.account.xuid,
+        });
+        let trigger_file = root.join("tropicalia-java-launch.tmp");
+        std::fs::write(&trigger_file, serde_json::to_vec_pretty(&launch_payload).unwrap())
+            .map_err(|e| format!("Falha ao acionar o motor Java Android: {e}"))?;
+        std::fs::rename(&trigger_file, root.join("tropicalia-java-launch.json")).map_err(|e| e.to_string())?;
+
+        let generation = ANDROID_LAUNCH_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        state.games.lock().await.insert(owner.clone(), generation);
+
+        let app_mon = app.clone();
+        let owner_mon = owner.clone();
+        let waiting_message = match req.language.as_deref().unwrap_or("en_us") {
+            lang if lang.starts_with("pt") => "Abrindo o jogo. Confirme eventuais avisos na tela do Minecraft.",
+            lang if lang.starts_with("es") => "Abriendo el juego. Confirma los avisos en la pantalla de Minecraft.",
+            _ => "Opening the game. Confirm any notices on the Minecraft screen.",
+        }.to_owned();
+        tokio::spawn(async move {
+            let progress_file = root.join("tropicalia-progress.json");
+            let status_file = root.join("tropicalia-game-status.json");
+            let starting_file = root.join("tropicalia-game-starting.json");
+            let mut waiting_announced = false;
+            let exit_file = root.join("tropicalia-game-exit.json");
+            let paths_file = root.join("tropicalia-game-paths.json");
+
+            let mut started = false;
+            let mut log_offset: u64 = 0;
+            let mut candidate_log_paths = vec![
+                root.join("tropicalia-latestlog.txt"),
+                root.join("latestlog.txt"),
+                std::path::PathBuf::from("/storage/emulated/0/Android/data/com.tropicaliacraft.launcher/files/latestlog.txt"),
+                std::path::PathBuf::from("/storage/emulated/0/Android/data/com.tropicaliacraft.launcher/files/.minecraft/logs/latest.log"),
+            ];
+
+            let mut last_activity = std::time::Instant::now();
+            let mut last_progress = String::new();
+
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                if app_mon.state::<AppState>().games.lock().await.get(&owner_mon).copied() != Some(generation) { break; }
+
+                // 1. Caminhos dinâmicos enviados pela activity Java
+                if let Ok(raw) = std::fs::read_to_string(&paths_file) {
+                    if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+                        if let Some(p) = v.get("latestLog").and_then(Value::as_str) {
+                            let pb = std::path::PathBuf::from(p);
+                            if !candidate_log_paths.contains(&pb) {
+                                candidate_log_paths.insert(0, pb);
+                            }
+                        }
+                    }
+                }
+
+                // 2. Progresso real vindo do ProgressKeeper / descompactador JRE
+                if !started && starting_file.exists() && !waiting_announced {
+                    waiting_announced = true;
+                    download::emit(&app_mon, &owner_mon, "launch", 0, 1, &waiting_message);
+                }
+                if !started && !starting_file.exists() {
+                    if let Ok(raw) = std::fs::read_to_string(&progress_file) {
+                        if raw != last_progress { last_activity = std::time::Instant::now(); last_progress = raw.clone(); }
+                        if let Ok(p) = serde_json::from_str::<Value>(&raw) {
+                            let stage = p.get("stage").and_then(Value::as_str).unwrap_or("minecraft").to_string();
+                            let current = p.get("current").and_then(Value::as_u64).unwrap_or(0);
+                            let total = p.get("total").and_then(Value::as_u64).unwrap_or(100);
+                            let message = p.get("message").and_then(Value::as_str).unwrap_or("Preparando…").to_string();
+                            download::emit(&app_mon, &owner_mon, &stage, current as usize, total as usize, message);
+                        }
+                    }
+                }
+
+                // 3. Streaming de logs do Minecraft para a UI (game://log)
+                for log_path in &candidate_log_paths {
+                    if let Ok(metadata) = std::fs::metadata(log_path) {
+                        let len = metadata.len();
+                        if len > log_offset {
+                            if let Ok(mut f) = std::fs::File::open(log_path) {
+                                use std::io::{Read, Seek, SeekFrom};
+                                if f.seek(SeekFrom::Start(log_offset)).is_ok() {
+                                    let mut chunk = Vec::new();
+                                    if f.read_to_end(&mut chunk).is_ok() {
+                                        log_offset = len;
+                                        let text = String::from_utf8_lossy(&chunk);
+                                        for line in text.lines() {
+                                            if !line.is_empty() {
+                                                let _ = app_mon.emit("game://log", GameLog {
+                                                    owner: owner_mon.clone(),
+                                                    line: line.to_string(),
+                                                    stream: "out",
+                                                });
+                                            }
+                                        }
+                                        last_activity = std::time::Instant::now();
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                // 4. Sinal de jogo rodando
+                if !started && status_file.exists() {
+                    started = true;
+                    let _ = app_mon.emit("game://started", json!({ "owner": owner_mon.clone(), "pid": 1 }));
+                }
+
+                // 5. Sinal de encerramento do jogo
+                if exit_file.exists() {
+                    let mut code = Some(0);
+                    if let Ok(raw) = std::fs::read_to_string(&exit_file) {
+                        if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+                            code = v.get("code").and_then(Value::as_i64).map(|c| c as i32);
+                        }
+                    }
+                    let _ = std::fs::remove_file(&exit_file);
+                    let st = app_mon.state::<AppState>();
+                    st.games.lock().await.remove(&owner_mon);
+                    let _ = app_mon.emit("game://exit", GameExit { owner: owner_mon.clone(), code });
+                    break;
+                }
+
+                // 6. Timeout de inatividade; downloads em progresso renovam o prazo
+                // A native activity may be waiting for the player's RAM/compatibility
+                // confirmation. That is not a stalled download.
+                if java_startup_timed_out(started, starting_file.exists(), last_activity.elapsed().as_secs()) {
+                    let st = app_mon.state::<AppState>();
+                    st.games.lock().await.remove(&owner_mon);
+                    let _ = app_mon.emit("game://exit", GameExit { owner: owner_mon.clone(), code: Some(-1) });
+                    break;
+                }
+            }
+        });
+        return Ok(());
+}
+
+#[cfg(target_os = "android")]
+async fn prepare_java_android(app: &AppHandle, req: &LaunchRequest, shared: &Path, game_dir: &Path) -> Result<(), String> {
+    let root = paths::root(app)?;
+    let ready = root.join("tropicalia-java-ready.json");
+    let _ = std::fs::remove_file(&ready);
+    let payload = json!({
+        "phase": "prepare", "instanceId": req.instance_id,
+        "versionId": req.game_version, "gameDir": game_dir,
+        "sharedDir": shared, "javaRuntime": req.java_runtime,
+    });
+    let temporary = root.join("tropicalia-java-launch.tmp");
+    std::fs::write(&temporary, payload.to_string()).map_err(|e| e.to_string())?;
+    std::fs::rename(temporary, root.join("tropicalia-java-launch.json")).map_err(|e| e.to_string())?;
+    let started = std::time::Instant::now();
+    loop {
+        if let Ok(raw) = std::fs::read_to_string(&ready) {
+            let result: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+            let _ = std::fs::remove_file(&ready);
+            if let Some(error) = result.get("error").and_then(Value::as_str) { return Err(error.into()); }
+            return Ok(());
+        }
+        if started.elapsed().as_secs() > 900 {
+            let _ = std::fs::remove_file(root.join("tropicalia-java-launch.json"));
+            return Err("O motor Pojav não confirmou a preparação do Java Android.".into());
+        }
+        if let Ok(progress) = read_json(&root.join("tropicalia-progress.json")) {
+            download::emit(app, &req.instance_id, "java",
+                progress["current"].as_u64().unwrap_or(0) as usize,
+                progress["total"].as_u64().unwrap_or(100) as usize,
+                progress["message"].as_str().unwrap_or("Preparando Java Android…"));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+    }
+}
+
 // ---------------------------------------------------------------- comando principal
+
+/// Recover Java files misplaced by the old directory-guessing installer.
+pub(crate) fn migrate_java_mods(game_dir: &Path) -> Result<(), String> {
+    let source = game_dir.join("horizon-mods");
+    if !source.is_dir() { return Ok(()); }
+    let target = game_dir.join("mods");
+    std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+    for entry in std::fs::read_dir(source).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if entry.path().is_file() && (name.ends_with(".jar") || name.ends_with(".jar.disabled")) {
+            let destination = target.join(&name);
+            if !destination.exists() {
+                std::fs::rename(entry.path(), destination).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn java_startup_timed_out(started: bool, activity_created: bool, idle_seconds: u64) -> bool {
+    !started && idle_seconds > if activity_created { 900 } else { 180 }
+}
+
+#[cfg(test)]
+mod mod_migration_tests {
+    #[test]
+    fn waiting_for_native_notices_is_not_a_stalled_download() {
+        assert!(!super::java_startup_timed_out(false, true, 240));
+        assert!(super::java_startup_timed_out(false, false, 181));
+        assert!(super::java_startup_timed_out(false, true, 901));
+        assert!(!super::java_startup_timed_out(true, true, 1000));
+    }
+
+    #[test]
+    fn recovers_enabled_and_disabled_java_mods_without_overwriting_or_moving_rust_mods() {
+        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("tropicalia-mod-migration-{unique}"));
+        let source = root.join("horizon-mods");
+        let target = root.join("mods");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        for name in ["fabric-api.jar", "optional.jar.disabled", "existing.jar", "zoom.hmod"] {
+            std::fs::write(source.join(name), b"source").unwrap();
+        }
+        std::fs::write(target.join("existing.jar"), b"keep").unwrap();
+        super::migrate_java_mods(&root).unwrap();
+        assert_eq!(std::fs::read(target.join("fabric-api.jar")).unwrap(), b"source");
+        assert!(target.join("optional.jar.disabled").is_file());
+        assert_eq!(std::fs::read(target.join("existing.jar")).unwrap(), b"keep");
+        assert!(source.join("existing.jar").is_file());
+        assert!(source.join("zoom.hmod").is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
 
 #[tauri::command]
 pub async fn game_launch(app: AppHandle, state: State<'_, AppState>, req: LaunchRequest) -> Result<(), String> {
     let owner = req.instance_id.clone();
     {
         let games = state.games.lock().await;
+        if cfg!(target_os = "android") && !games.is_empty() {
+            return Err("Encerre o jogo atual antes de abrir outra instância no Android.".into());
+        }
         if games.contains_key(&owner) {
             return Err("Essa instância já está aberta".into());
+        }
+    }
+
+    // Toda instância (Java ou Rust) sempre tem o servidor oficial no topo da lista do jogo.
+    if let Ok(dir) = paths::instance(&app, &owner) {
+        if let Err(e) = crate::servers_dat::ensure_official_server(&dir) {
+            eprintln!("servers.dat: {e}");
         }
     }
 
@@ -909,13 +1212,19 @@ pub async fn game_launch(app: AppHandle, state: State<'_, AppState>, req: Launch
     let client = state.http.clone();
     let shared = paths::shared(&app)?;
     let game_dir = paths::instance(&app, &owner)?;
+    migrate_java_mods(&game_dir)?;
     let libdir = shared.join("libraries");
 
     // 1-2. versões e loader
     download::emit(&app, &owner, "versions", 0, 1, format!("Preparando Minecraft {}", req.game_version));
     ensure_vanilla_json(&client, &shared, &req.game_version).await?;
+    #[cfg(target_os = "android")]
+    prepare_java_android(&app, &req, &shared, &game_dir).await?;
     let version_id = ensure_loader(&app, &client, &shared, &req).await?;
     let version = load_merged(&shared, &version_id)?;
+    #[cfg(target_os = "android")]
+    return launch_java_android(&app, &state, &req, version_id, shared, game_dir, version).await;
+
 
     // 3. client.jar + bibliotecas
     let client_jar = shared.join("versions").join(&version_id).join(format!("{version_id}.jar"));
@@ -982,151 +1291,7 @@ pub async fn game_launch(app: AppHandle, state: State<'_, AppState>, req: Launch
         extract_natives(&plan.natives, &natives_dir)?;
     }
 
-    sync_options_language(&game_dir);
-
-    #[cfg(target_os = "android")]
-    {
-        let _ = (asset_index, game_assets, log_arg);
-        download::emit(&app, &owner, "launch", 1, 1, "Iniciando Minecraft no Android…");
-        let root = paths::root(&app)?;
-        let _ = std::fs::remove_file(root.join("tropicalia-game-exit.json"));
-        let _ = std::fs::remove_file(root.join("tropicalia-game-status.json"));
-        let _ = std::fs::remove_file(root.join("tropicalia-progress.json"));
-        let _ = std::fs::remove_file(root.join("tropicalia-game-kill.json"));
-
-        let launch_payload = json!({
-            "instanceId": owner,
-            "versionId": version_id,
-            "gameDir": game_dir.to_string_lossy().to_string(),
-            "username": req.account.username,
-            "uuid": req.account.uuid,
-            "accessToken": req.account.access_token,
-            "userType": req.account.user_type,
-            "memoryMb": req.memory_max_mb.max(1024),
-            "jvmArgs": req.jvm_args.join(" "),
-            "serverAddress": req.server_address,
-            "javaRenderer": req.java_renderer,
-            "useAngle": req.use_angle.unwrap_or(false),
-            "javaRuntime": req.java_runtime,
-        });
-        let trigger_file = root.join("tropicalia-java-launch.json");
-        std::fs::write(&trigger_file, serde_json::to_vec_pretty(&launch_payload).unwrap())
-            .map_err(|e| format!("Falha ao acionar o motor Java Android: {e}"))?;
-
-        state.games.lock().await.insert(owner.clone(), 1);
-
-        let app_mon = app.clone();
-        let owner_mon = owner.clone();
-        tokio::spawn(async move {
-            let progress_file = root.join("tropicalia-progress.json");
-            let status_file = root.join("tropicalia-game-status.json");
-            let exit_file = root.join("tropicalia-game-exit.json");
-            let paths_file = root.join("tropicalia-game-paths.json");
-
-            let mut started = false;
-            let mut log_offset: u64 = 0;
-            let mut candidate_log_paths = vec![
-                root.join("tropicalia-latestlog.txt"),
-                root.join("latestlog.txt"),
-                std::path::PathBuf::from("/storage/emulated/0/Android/data/com.tropicaliacraft.launcher/files/latestlog.txt"),
-                std::path::PathBuf::from("/storage/emulated/0/Android/data/com.tropicaliacraft.launcher/files/.minecraft/logs/latest.log"),
-            ];
-
-            let start_time = std::time::Instant::now();
-
-            loop {
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-
-                // 1. Caminhos dinâmicos enviados pela activity Java
-                if let Ok(raw) = std::fs::read_to_string(&paths_file) {
-                    if let Ok(v) = serde_json::from_str::<Value>(&raw) {
-                        if let Some(p) = v.get("latestLog").and_then(Value::as_str) {
-                            let pb = std::path::PathBuf::from(p);
-                            if !candidate_log_paths.contains(&pb) {
-                                candidate_log_paths.insert(0, pb);
-                            }
-                        }
-                    }
-                }
-
-                // 2. Progresso real vindo do ProgressKeeper / descompactador JRE
-                if !started {
-                    if let Ok(raw) = std::fs::read_to_string(&progress_file) {
-                        if let Ok(p) = serde_json::from_str::<Value>(&raw) {
-                            let stage = p.get("stage").and_then(Value::as_str).unwrap_or("minecraft").to_string();
-                            let current = p.get("current").and_then(Value::as_u64).unwrap_or(0);
-                            let total = p.get("total").and_then(Value::as_u64).unwrap_or(100);
-                            let message = p.get("message").and_then(Value::as_str).unwrap_or("Preparando…").to_string();
-                            download::emit(&app_mon, &owner_mon, &stage, current as usize, total as usize, message);
-                        }
-                    }
-                }
-
-                // 3. Streaming de logs do Minecraft para a UI (game://log)
-                for log_path in &candidate_log_paths {
-                    if let Ok(metadata) = std::fs::metadata(log_path) {
-                        let len = metadata.len();
-                        if len > log_offset {
-                            if let Ok(mut f) = std::fs::File::open(log_path) {
-                                use std::io::{Read, Seek, SeekFrom};
-                                if f.seek(SeekFrom::Start(log_offset)).is_ok() {
-                                    let mut chunk = Vec::new();
-                                    if f.read_to_end(&mut chunk).is_ok() {
-                                        log_offset = len;
-                                        let text = String::from_utf8_lossy(&chunk);
-                                        for line in text.lines() {
-                                            if !line.is_empty() {
-                                                let _ = app_mon.emit("game://log", GameLog {
-                                                    owner: owner_mon.clone(),
-                                                    line: line.to_string(),
-                                                    stream: "out",
-                                                });
-                                            }
-                                        }
-                                        if !started {
-                                            started = true;
-                                            let _ = app_mon.emit("game://started", json!({ "owner": owner_mon.clone(), "pid": 1 }));
-                                        }
-                                    }
-                                }
-                            }
-                            break;
-                        }
-                    }
-                }
-
-                // 4. Sinal de jogo rodando
-                if !started && status_file.exists() {
-                    started = true;
-                    let _ = app_mon.emit("game://started", json!({ "owner": owner_mon.clone(), "pid": 1 }));
-                }
-
-                // 5. Sinal de encerramento do jogo
-                if exit_file.exists() {
-                    let mut code = Some(0);
-                    if let Ok(raw) = std::fs::read_to_string(&exit_file) {
-                        if let Ok(v) = serde_json::from_str::<Value>(&raw) {
-                            code = v.get("code").and_then(Value::as_i64).map(|c| c as i32);
-                        }
-                    }
-                    let _ = std::fs::remove_file(&exit_file);
-                    let st = app_mon.state::<AppState>();
-                    st.games.lock().await.remove(&owner_mon);
-                    let _ = app_mon.emit("game://exit", GameExit { owner: owner_mon.clone(), code });
-                    break;
-                }
-
-                // 6. Timeout de segurança se nunca iniciar (3 minutos)
-                if !started && start_time.elapsed().as_secs() > 180 {
-                    let st = app_mon.state::<AppState>();
-                    st.games.lock().await.remove(&owner_mon);
-                    let _ = app_mon.emit("game://exit", GameExit { owner: owner_mon.clone(), code: Some(-1) });
-                    break;
-                }
-            }
-        });
-        return Ok(());
-    }
+    sync_options_language(&game_dir, req.language.as_deref());
 
     #[cfg(not(target_os = "android"))]
     {
@@ -1237,7 +1402,7 @@ pub async fn game_launch(app: AppHandle, state: State<'_, AppState>, req: Launch
         final_args = vec![format!("@{}", argfile.to_string_lossy())];
     }
 
-    sync_options_language(&game_dir);
+    sync_options_language(&game_dir, req.language.as_deref());
 
     let mut cmd = tokio::process::Command::new(&java);
     cmd.args(&final_args).current_dir(&game_dir).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -1330,7 +1495,7 @@ pub async fn launch_horizon_rust(app: &AppHandle, state: &State<'_, AppState>, r
     let game_dir = paths::instance(app, &owner)?;
     let mods_dir = game_dir.join("horizon-mods");
     let _ = std::fs::create_dir_all(&mods_dir);
-    sync_options_language(&game_dir);
+    sync_options_language(&game_dir, req.language.as_deref());
 
     #[cfg(target_os = "android")]
     {
@@ -1340,18 +1505,36 @@ pub async fn launch_horizon_rust(app: &AppHandle, state: &State<'_, AppState>, r
         let files_dir = root_dir.join("files");
         let _ = std::fs::create_dir_all(&files_dir);
 
-        let mc_lang = map_to_mc_language(&detect_system_locale());
+        let mc_lang = map_to_mc_language(req.language.as_deref().unwrap_or(&detect_system_locale()));
         let player_name = if req.account.username.trim().is_empty() {
             "Player"
         } else {
             req.account.username.trim()
         };
-        let launcher_cfg = json!({
-            "name": player_name,
-            "server": req.server_address.clone().unwrap_or_default(),
-            "lang": mc_lang,
-            "renderer": "vulkan",
-        });
+        // Keep the engine's selected renderer, including its persisted crash recovery.
+        let mut launcher_cfg = read_json(&files_dir.join("android-launcher.json"))
+            .or_else(|_| read_json(&root_dir.join("android-launcher.json")))
+            .ok().filter(Value::is_object).unwrap_or_else(|| json!({}));
+        launcher_cfg["name"] = json!(player_name);
+        launcher_cfg["server"] = json!(req.server_address.clone().unwrap_or_default());
+        launcher_cfg["lang"] = json!(mc_lang);
+        launcher_cfg["game_dir"] = json!(game_dir.to_string_lossy());
+        if launcher_cfg.get("renderer").is_none() {
+            launcher_cfg["renderer"] = json!("vulkan");
+        }
+        // Skin do Skin Studio (botão USAR): o processo :horizon lê isto e exporta HORIZON_OFFLINE_SKIN.
+        match crate::content::active_skin(app) {
+            Some((png, model)) => {
+                launcher_cfg["offline_skin"] = json!(png.to_string_lossy());
+                launcher_cfg["offline_skin_model"] = json!(model);
+            }
+            None => {
+                if let Some(o) = launcher_cfg.as_object_mut() {
+                    o.remove("offline_skin");
+                    o.remove("offline_skin_model");
+                }
+            }
+        }
 
         // 1. Gravar horizon-player.txt e horizon-mods.txt
         let player_content = format!("name:{player_name}\n");
@@ -1360,8 +1543,36 @@ pub async fn launch_horizon_rust(app: &AppHandle, state: &State<'_, AppState>, r
         let _ = std::fs::write(files_dir.join("horizon-player.txt"), &player_content);
 
         if let Ok(mods_content) = std::fs::read_to_string(game_dir.join("horizon-mods.txt")) {
-            let _ = std::fs::write(root_dir.join("horizon-mods.txt"), &mods_content);
-            let _ = std::fs::write(files_dir.join("horizon-mods.txt"), &mods_content);
+            std::fs::write(root_dir.join("horizon-mods.txt"), &mods_content).map_err(|e| e.to_string())?;
+            std::fs::write(files_dir.join("horizon-mods.txt"), &mods_content).map_err(|e| e.to_string())?;
+        }
+
+        // Horizon's Android process reads files/ rather than the instance directory.
+        // Replace the active mod set so disabled mods from another instance cannot leak in.
+        for folder in ["horizon-mods", "resourcepacks", "shaderpacks"] {
+            let source = game_dir.join(folder);
+            std::fs::create_dir_all(&source).map_err(|e| e.to_string())?;
+            for target in [root_dir.join(folder), files_dir.join(folder)] {
+                std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+                for entry in std::fs::read_dir(&target).map_err(|e| e.to_string())? {
+                    let entry = entry.map_err(|e| e.to_string())?;
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if entry.path().is_file() && !name.starts_with('.') {
+                        std::fs::remove_file(entry.path()).map_err(|e| e.to_string())?;
+                    }
+                }
+                for entry in std::fs::read_dir(&source).map_err(|e| e.to_string())? {
+                    let entry = entry.map_err(|e| e.to_string())?;
+                    if entry.path().is_file() {
+                        std::fs::copy(entry.path(), target.join(entry.file_name())).map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+        }
+
+        // O processo :horizon roda na pasta raiz/files, não na da instância: o servidor oficial vai lá também.
+        for d in [&root_dir, &files_dir] {
+            let _ = crate::servers_dat::ensure_official_server(d);
         }
 
         // 2. Sincronizar opções
@@ -1376,8 +1587,8 @@ pub async fn launch_horizon_rust(app: &AppHandle, state: &State<'_, AppState>, r
         let _ = std::fs::write(root_dir.join("tropicalia-auto.flag"), b"1\n");
         let _ = std::fs::write(files_dir.join("tropicalia-auto.flag"), b"1\n");
 
-        sync_options_language(&root_dir);
-        sync_options_language(&files_dir);
+        sync_options_language(&root_dir, req.language.as_deref());
+        sync_options_language(&files_dir, req.language.as_deref());
 
         // 4. Gravar argumentos extras em android-launch.json
         let mut cli_args = Vec::new();
@@ -1458,21 +1669,42 @@ pub async fn launch_horizon_rust(app: &AppHandle, state: &State<'_, AppState>, r
             "Iniciando Minecraft Rust (26.3 Vulkan) no Android…".to_string(),
         );
 
-        let _ = std::fs::remove_file(files_dir.join("vulkan-startup.pending"));
-        let _ = std::fs::remove_file(root_dir.join("vulkan-startup.pending"));
+        // Preserve startup markers so Horizon can recover from Vulkan device loss.
 
+        for marker in ["tropicalia-game-exit.json", "tropicalia-game-status.json", "tropicalia-game-starting.json", "tropicalia-game-kill.json"] {
+            let _ = std::fs::remove_file(root_dir.join(marker));
+        }
         // 6. Gravar trigger tropicalia-horizon-launch.json
         let trigger_file = root_dir.join("tropicalia-horizon-launch.json");
         std::fs::write(&trigger_file, &cfg_bytes)
             .map_err(|e| format!("Falha ao acionar o motor Horizon Rust Android: {e}"))?;
         let _ = std::fs::write(files_dir.join("tropicalia-horizon-launch.json"), &cfg_bytes);
 
-        let _ = app.emit("game://started", json!({ "owner": owner, "pid": 1 }));
+        let generation = ANDROID_LAUNCH_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        state.games.lock().await.insert(owner.clone(), generation);
         let app2 = app.clone();
         let owner2 = owner.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-            let _ = app2.emit("game://exit", GameExit { owner: owner2, code: Some(0) });
+            let since = std::time::Instant::now();
+            let mut started = false;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+                let st = app2.state::<AppState>();
+                if st.games.lock().await.get(&owner2).copied() != Some(generation) { break; }
+                if !started && root_dir.join("tropicalia-game-status.json").is_file() {
+                    started = true;
+                    let _ = app2.emit("game://started", json!({ "owner": owner2.clone(), "pid": 1 }));
+                }
+                let exit = root_dir.join("tropicalia-game-exit.json");
+                if exit.is_file() || (!started && since.elapsed().as_secs() > 180) {
+                    let code = std::fs::read_to_string(&exit).ok()
+                        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                        .and_then(|v| v["code"].as_i64()).unwrap_or(-1) as i32;
+                    st.games.lock().await.remove(&owner2);
+                    let _ = app2.emit("game://exit", GameExit { owner: owner2.clone(), code: Some(code) });
+                    break;
+                }
+            }
         });
         return Ok(());
     }
@@ -1544,6 +1776,9 @@ pub async fn launch_horizon_rust(app: &AppHandle, state: &State<'_, AppState>, r
         }
 
         cmd.env("HORIZON_HOME", &game_dir);
+        if let Some((png, model)) = crate::content::active_skin(app) {
+            cmd.env("HORIZON_OFFLINE_SKIN", &png).env("HORIZON_OFFLINE_SKIN_MODEL", model);
+        }
         if req.memory_max_mb > 0 {
             cmd.env("HORIZON_MEMORY_LIMIT_MB", req.memory_max_mb.to_string());
         }
@@ -1624,6 +1859,12 @@ pub async fn ensure_horizon_engine(
     owner: &str,
     force_sync: bool,
 ) -> Result<(PathBuf, PathBuf), String> {
+    // All-in-one desktop build: our own Horizon (same engine and TropicaliaCraft splash as the APK)
+    // ships inside the installer and installs its resources the way the APK does.
+    if let Some(bundle) = bundled_horizon(app) {
+        return ensure_bundled_horizon(app, owner, force_sync, &bundle).await;
+    }
+
     let horizon_dir = paths::root(app)?.join("runtimes").join("horizon");
     std::fs::create_dir_all(&horizon_dir).map_err(|e| e.to_string())?;
 
@@ -1774,6 +2015,119 @@ pub async fn ensure_horizon_engine(
         download::emit(app, owner, "horizon-prepare", 100, 100, "Recursos e sons sincronizados com sucesso!".to_string());
     }
 
+    Ok((client_bin, resources_dir))
+}
+
+/// `resources/horizon/` inside the installed app (Windows, Linux, macOS bundles), when this build
+/// carries the TropicaliaCraft Horizon engine. `None` keeps the old download path.
+#[cfg(not(target_os = "android"))]
+fn bundled_horizon(app: &AppHandle) -> Option<PathBuf> {
+    let dir = app.path().resource_dir().ok()?.join("horizon");
+    let exe = if cfg!(windows) { "horizon-client.exe" } else { "horizon-client" };
+    dir.join(exe).is_file().then_some(dir)
+}
+
+#[cfg(target_os = "android")]
+fn bundled_horizon(_app: &AppHandle) -> Option<PathBuf> {
+    None
+}
+
+/// Size and modification time of every bundled file: a new installer changes it.
+fn bundle_stamp(dir: &Path) -> String {
+    let mut parts: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let m = e.metadata().ok()?;
+            let t = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+            Some(format!("{}:{}:{}", e.file_name().to_string_lossy(), m.len(), t))
+        })
+        .collect();
+    parts.sort();
+    parts.join("\n")
+}
+
+/// Copies the bundled engine to the data folder (once per installer version) and runs its
+/// Java-free resource installer — the same code path the Android APK uses on first boot.
+async fn ensure_bundled_horizon(app: &AppHandle, owner: &str, force_sync: bool, bundle: &Path) -> Result<(PathBuf, PathBuf), String> {
+    let horizon_dir = paths::root(app)?.join("runtimes").join("horizon-tropicalia");
+    std::fs::create_dir_all(&horizon_dir).map_err(|e| e.to_string())?;
+    let exe_name = if cfg!(windows) { "horizon-client.exe" } else { "horizon-client" };
+    let client_bin = horizon_dir.join(exe_name);
+
+    let stamp = bundle_stamp(bundle);
+    let stamp_file = horizon_dir.join("bundle.stamp");
+    if force_sync || !client_bin.is_file() || std::fs::read_to_string(&stamp_file).ok().as_deref() != Some(stamp.as_str()) {
+        download::emit(app, owner, "horizon-engine", 0, 1, "Instalando o motor Horizon Rust do TropicaliaCraft…".to_string());
+        for entry in std::fs::read_dir(bundle).map_err(|e| e.to_string())?.flatten() {
+            let from = entry.path();
+            if from.is_file() {
+                std::fs::copy(&from, horizon_dir.join(entry.file_name()))
+                    .map_err(|e| format!("Falha ao copiar {}: {e}", from.display()))?;
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&client_bin, std::fs::Permissions::from_mode(0o755));
+        }
+        // The copy carries the download's quarantine flag on macOS; Gatekeeper would then block
+        // the engine even though the launcher itself was allowed to open.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("xattr").args(["-dr", "com.apple.quarantine"]).arg(&horizon_dir).status();
+        }
+        std::fs::write(&stamp_file, &stamp).map_err(|e| e.to_string())?;
+        download::emit(app, owner, "horizon-engine", 1, 1, "Motor Horizon Rust instalado".to_string());
+    }
+
+    let resources_dir = horizon_dir.join(".local").join("horizon-client").join("26.3");
+    let mut cmd = tokio::process::Command::new(&client_bin);
+    cmd.current_dir(&horizon_dir).arg("--install-resources").arg("--home").arg(&horizon_dir);
+    if force_sync {
+        cmd.arg("--force");
+    }
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    hide_console(&mut cmd);
+    let mut child = cmd.spawn().map_err(|e| format!("Falha ao iniciar o instalador do Horizon: {e}"))?;
+    let mut last_error: Option<String> = None;
+    if let Some(stdout) = child.stdout.take() {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let Ok(json) = serde_json::from_str::<Value>(&line) else { continue };
+            if let Some(err) = json.get("error").and_then(Value::as_str) {
+                last_error = Some(err.to_string());
+                continue;
+            }
+            if json.get("ready").is_some() {
+                download::emit(app, owner, "horizon-prepare", 100, 100, "Recursos do jogo prontos".to_string());
+                continue;
+            }
+            let stage = json.get("stage").and_then(Value::as_u64).unwrap_or(0) as f64;
+            let stages = json.get("stages").and_then(Value::as_u64).unwrap_or(6).max(1) as f64;
+            let done = json.get("done").and_then(Value::as_u64).unwrap_or(0) as f64;
+            let total = json.get("total").and_then(Value::as_u64).unwrap_or(0) as f64;
+            let inner = if total > 0.0 { (done / total).clamp(0.0, 1.0) } else { 0.0 };
+            let pct = (((stage + inner) / stages) * 100.0).round() as usize;
+            let label = match stage as u64 {
+                0 => "Verificando a versão do Minecraft…",
+                1 => "Baixando recursos e sons oficiais do Minecraft…",
+                2 => "Descompactando arquivos verificados…",
+                3 => "Preparando mundos e registros…",
+                4 => "Preparando controles de toque…",
+                _ => "Finalizando instalação…",
+            };
+            download::emit(app, owner, "horizon-prepare", pct.min(99), 100, label.to_string());
+        }
+    }
+    let status = child.wait().await.map_err(|e| format!("Falha ao aguardar o instalador do Horizon: {e}"))?;
+    if !status.success() {
+        return Err(format!(
+            "Não foi possível preparar o Minecraft Rust: {}",
+            last_error.unwrap_or_else(|| "o instalador do Horizon terminou com erro".into())
+        ));
+    }
     Ok((client_bin, resources_dir))
 }
 

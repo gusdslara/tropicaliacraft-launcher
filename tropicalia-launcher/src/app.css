@@ -1,4 +1,5 @@
-@import 'tailwindcss';
+@import 'tailwindcss' source(none);
+@source './';
 
 /* ------------------------------------------------------------------ fontes (locais: o launcher funciona offline) */
 @font-face {
@@ -296,3 +297,9 @@ input[type='range'].tp-range { width: 100%; accent-color: var(--tp-emerald); }
     min-height: 42px;
   }
 }
+
+/* Labels remain readable at narrow widths and with translated text. */
+.px-btn { max-width: 100%; white-space: normal; overflow-wrap: anywhere; height: auto; min-height: 2.5rem; padding-top: 0.45rem; padding-bottom: 0.45rem; }
+.px-btn.sm, .px-btn.xs { height: auto; min-height: 2rem; padding-top: 0.35rem; padding-bottom: 0.35rem; }
+.tp-input, .tp-select { min-width: 0; }
+@media (pointer: coarse) { .px-btn.sm, .px-btn.xs { min-height: 44px; } }

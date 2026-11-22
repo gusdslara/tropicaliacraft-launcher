@@ -5,8 +5,10 @@
 	import { detectLanguage, i18n } from '$lib/i18n';
 	import AccountsModal from '$lib/components/AccountsModal.svelte';
 	import UpdateModal from '$lib/components/UpdateModal.svelte';
+	import LaunchPresentation from '$lib/components/LaunchPresentation.svelte';
 	import Toasts from '$lib/components/Toasts.svelte';
-	import { ChevronDown, Compass, House, Layers, Server, Settings } from 'lucide-svelte';
+	import { ChevronDown, Gamepad2, House, Settings, Shirt } from 'lucide-svelte';
+	import { tr } from '$lib/ui-text';
 
 	let { children } = $props();
 
@@ -19,15 +21,15 @@
 
 	const nav = $derived([
 		{ href: '/', label: t.home, icon: House },
-		{ href: '/instancias', label: t.instances, icon: Layers },
-		{ href: '/explorar', label: t.explore, icon: Compass },
-		{ href: '/servidores', label: t.servers, icon: Server },
+		{ href: '/skins', label: tr('Skins'), icon: Shirt },
+		{ href: '/controles', label: tr('Controles'), icon: Gamepad2 },
 		{ href: '/ajustes', label: t.settings, icon: Settings }
 	]);
 
 	const isActive = (href: string) => (href === '/' ? page.url.pathname === '/' : page.url.pathname.startsWith(href));
+	/** Editors that fill the whole area below the header. */
+	const isFullBleed = $derived(['/skins', '/controles'].some((p) => page.url.pathname.startsWith(p)));
 	const acc = $derived(app.activeAccount);
-	const runningServers = $derived(Object.values(app.serverStatus).filter((s) => s === 'running').length);
 	const avatar = $derived(
 		acc?.type === 'microsoft' ? `https://mc-heads.net/avatar/${acc.uuid.replace(/-/g, '')}/40` : '/images/steve-head.png'
 	);
@@ -36,11 +38,8 @@
 <div class="shell">
 	<header class="top">
 		<a href="/" class="logo">
-			<img src="/images/tropi_creeper.png" alt="Tropicalia" class="pixel" width="28" height="42" />
-			<div class="logo-text">
-				<span class="font-mc text-[13px] text-emerald-400 block tracking-wider leading-tight">TROPICALIA</span>
-				<small class="font-mc hidden sm:block">LAUNCHER</small>
-			</div>
+			<img src="/images/tropi_creeper.png" alt="" class="pixel logo-creeper" width="28" height="42" />
+			<img src="/images/tropicalia_logo.png" alt="Tropicalia Craft" class="logo-wordmark" />
 		</a>
 
 		<nav class="desktop-nav">
@@ -49,7 +48,6 @@
 				<a href={item.href} class:active={isActive(item.href)} aria-current={isActive(item.href) ? 'page' : undefined}>
 					<Icon size={15} strokeWidth={2.5} />
 					<span>{item.label}</span>
-					{#if item.href === '/servidores' && runningServers}<i class="dot"></i>{/if}
 				</a>
 			{/each}
 		</nav>
@@ -72,7 +70,7 @@
 		</button>
 	</header>
 
-	<main>
+	<main class:bleed={isFullBleed}>
 		{#if app.ready}
 			{@render children()}
 		{:else}
@@ -87,13 +85,14 @@
 			<a href={item.href} class="mobile-nav-item" class:active={isActive(item.href)} aria-current={isActive(item.href) ? 'page' : undefined}>
 				<div class="relative flex items-center justify-center">
 					<Icon size={19} strokeWidth={isActive(item.href) ? 2.5 : 2} />
-					{#if item.href === '/servidores' && runningServers}<i class="mobile-dot"></i>{/if}
 				</div>
 				<span class="font-mc">{item.label}</span>
 			</a>
 		{/each}
 	</nav>
 </div>
+
+{#if app.launchPresentation}<LaunchPresentation />{/if}
 
 <AccountsModal />
 <UpdateModal />
@@ -102,7 +101,8 @@
 <style>
 	.shell {
 		display: grid;
-		grid-template-rows: auto 1fr;
+		grid-template-rows: auto minmax(0, 1fr);
+		grid-template-columns: minmax(0, 1fr);
 		height: 100vh;
 		height: 100dvh;
 		max-width: 100vw;
@@ -113,45 +113,32 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: 12px;
-		height: 60px;
-		padding: 0 16px;
+		height: calc(60px + env(safe-area-inset-top, 0px));
+		padding: env(safe-area-inset-top, 0px) 16px 0;
 		background: linear-gradient(#111915, #0c120f);
 		border-bottom: 2px solid #000;
 		box-shadow: 0 2px 0 #1d2a23;
 		position: relative;
 		z-index: 20;
 	}
-	/* faixa de grama embaixo da topbar */
-	.top::after {
-		content: '';
-		position: absolute;
-		left: 0;
-		right: 0;
-		bottom: -10px;
-		height: 8px;
-		background: url('/images/grass-strip.png') 0 0 / 21.33px 8px repeat-x;
-		image-rendering: pixelated;
-		pointer-events: none;
-		opacity: 0.9;
-	}
 	.logo {
 		display: flex;
 		align-items: center;
-		gap: 10px;
+		gap: 8px;
 		text-decoration: none;
 		flex: none;
 	}
-	.logo img {
+	.logo .logo-creeper {
 		height: 40px;
+		width: auto;
+		image-rendering: pixelated;
+		filter: drop-shadow(2px 2px 0 rgba(0, 0, 0, 0.6));
+	}
+	.logo .logo-wordmark {
+		height: 36px;
 		width: auto;
 		image-rendering: auto;
 		filter: drop-shadow(2px 2px 0 rgba(0, 0, 0, 0.6));
-	}
-	.logo small {
-		margin-top: 1px;
-		font-size: 9px;
-		color: var(--tp-green);
-		letter-spacing: 0.32em;
 	}
 	.desktop-nav {
 		display: flex;
@@ -183,12 +170,6 @@
 	}
 	.desktop-nav a.active :global(svg) {
 		color: var(--tp-green);
-	}
-	.dot {
-		width: 7px;
-		height: 7px;
-		background: var(--tp-green);
-		box-shadow: 0 0 8px var(--tp-green);
 	}
 	.account {
 		display: flex;
@@ -225,20 +206,14 @@
 		min-height: 0;
 		padding: 24px 28px 40px;
 	}
+	main.bleed {
+		overflow: hidden;
+		padding: 0;
+	}
 
 	/* ------------------------------------------------ barra mobile inferior */
 	.mobile-nav {
 		display: none;
-	}
-	.mobile-dot {
-		position: absolute;
-		top: -2px;
-		right: -5px;
-		width: 6px;
-		height: 6px;
-		border-radius: 50%;
-		background: var(--tp-green);
-		box-shadow: 0 0 6px var(--tp-green);
 	}
 
 	@media (max-width: 1024px) {
@@ -255,14 +230,17 @@
 			display: none;
 		}
 		.top {
-			height: 54px;
-			padding: 0 12px;
+			height: calc(54px + env(safe-area-inset-top, 0px));
+			padding: env(safe-area-inset-top, 0px) 12px 0;
 		}
 		.account {
 			max-width: 130px;
 		}
 		main {
 			padding: 16px 12px calc(68px + env(safe-area-inset-bottom, 0px));
+		}
+		main.bleed {
+			padding: 0 0 calc(54px + env(safe-area-inset-bottom, 0px));
 		}
 		.mobile-nav {
 			position: fixed;

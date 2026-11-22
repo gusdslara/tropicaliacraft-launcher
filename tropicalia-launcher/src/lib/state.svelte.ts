@@ -7,13 +7,19 @@ import type {
 	Account,
 	Instance,
 	InstalledContent,
+	LanServer,
+	PingResult,
+	SavedServer,
 	LocalServer,
 	ProgressEvent,
 	ServerStatus,
 	Settings
 } from '$lib/types';
-import { errorMessage, slugify, uid } from '$lib/util/format';
+import { DEFAULT_LOADER_ICON, errorMessage, slugify, uid } from '$lib/util/format';
+import { seedHorizonInstanceMods, ensureHorizonModsInstalled } from '$lib/services/horizon-mods';
 import { offlineUuid } from '$lib/util/offline-uuid';
+import { detectLanguage } from '$lib/i18n';
+import { buildControlsBundle, landscapeHeightDp, normalizeControls } from '$lib/controls';
 
 // ------------------------------------------------------------------ toasts
 
@@ -96,7 +102,7 @@ export const stageLabel = (s: string) => STAGE_LABEL[s] ?? s;
 class App {
 	ready = $state(false);
 	settings = $state<Settings>({
-		msClientId: import.meta.env.VITE_MS_CLIENT_ID ?? '',
+		msClientId: import.meta.env.VITE_MS_CLIENT_ID || ms.DEFAULT_MS_CLIENT_ID,
 		javaPath: '',
 		defaultJavaRenderer: 'opengles_mobileglues',
 		defaultUseAngle: false,
@@ -109,8 +115,15 @@ class App {
 	accounts = $state<Account[]>([]);
 	instances = $state<Instance[]>([]);
 	servers = $state<LocalServer[]>([]);
+	/** lista "Servidores" da tela inicial (o TropicaliaCraft oficial sempre em primeiro) */
+	savedServers = $state<SavedServer[]>([]);
+	/** último ping por endereço (`'loading'` enquanto mede) */
+	pings = $state<Record<string, PingResult | 'loading'>>({});
+	lanServers = $state<LanServer[]>([]);
+	lanScanning = $state(false);
 
 	tasks = $state<Record<string, LaunchTask>>({});
+	contentOperations = $state<Record<string, boolean>>({});
 	running = $state<Record<string, number>>({}); // instância → início (ms)
 	gameLogs = $state<Record<string, string[]>>({});
 	serverStatus = $state<Record<string, ServerStatus>>({});
@@ -135,14 +148,16 @@ class App {
 
 	async init() {
 		if (this.ready) return;
-		const [settings, accounts, instances, servers] = await Promise.all([
+		const [settings, accounts, instances, servers, savedServers] = await Promise.all([
 			kv.get<Partial<Settings>>('settings', {}),
 			kv.get<Account[]>('accounts', []),
 			kv.get<Instance[]>('instances', []),
-			kv.get<LocalServer[]>('servers', [])
+			kv.get<LocalServer[]>('servers', []),
+			kv.get<SavedServer[]>('savedServers', [])
 		]);
+		this.savedServers = withOfficialServer(savedServers);
 		Object.assign(this.settings, settings);
-		if (!this.settings.msClientId) this.settings.msClientId = import.meta.env.VITE_MS_CLIENT_ID ?? '';
+		if (!this.settings.msClientId) this.settings.msClientId = import.meta.env.VITE_MS_CLIENT_ID || ms.DEFAULT_MS_CLIENT_ID;
 		this.accounts = accounts;
 		this.instances = instances;
 		this.servers = servers;
@@ -164,27 +179,33 @@ class App {
 			this.saveSettings();
 		}
 
-		if (this.instances.length === 0) {
-			const defaultRust: Instance = {
+		const makeDefaultRust = (): Instance => {
+			const inst: Instance = {
 				id: 'tropicaliacraft-rust',
 				name: 'TropicaliaCraft (Rust)',
 				gameVersion: '26.3',
 				loader: 'horizon-rust',
 				engine: 'rust',
-				icon: 'creeper',
+				icon: DEFAULT_LOADER_ICON['horizon-rust'],
 				memory: { minMb: 512, maxMb: this.settings.defaultMemoryMb || 4096 },
 				jvmArgs: '',
 				content: {},
 				createdAt: new Date().toISOString(),
 				playTimeMinutes: 0
 			};
+			seedHorizonInstanceMods(inst);
+			return inst;
+		};
+
+		if (this.instances.length === 0) {
+			const defaultRust = makeDefaultRust();
 			const defaultJava: Instance = {
 				id: 'tropicaliacraft-java',
 				name: 'TropicaliaCraft (Java)',
 				gameVersion: '1.20.1',
 				loader: 'fabric',
 				engine: 'java',
-				icon: 'iron',
+				icon: DEFAULT_LOADER_ICON.fabric,
 				javaRenderer: this.settings.defaultJavaRenderer || 'opengles_mobileglues',
 				useAngle: this.settings.defaultUseAngle || false,
 				javaRuntime: '',
@@ -198,25 +219,60 @@ class App {
 			this.settings.lastInstanceId = defaultRust.id;
 			this.saveInstances();
 			this.saveSettings();
-		} else if (!this.instances.some((i) => i.loader !== 'horizon-rust')) {
-			const defaultJava: Instance = {
-				id: 'tropicaliacraft-java',
-				name: 'TropicaliaCraft (Java)',
-				gameVersion: '1.20.1',
-				loader: 'fabric',
-				engine: 'java',
-				icon: 'iron',
-				javaRenderer: this.settings.defaultJavaRenderer || 'opengles_mobileglues',
-				useAngle: this.settings.defaultUseAngle || false,
-				javaRuntime: '',
-				memory: { minMb: 1024, maxMb: this.settings.defaultMemoryMb || 2048 },
-				jvmArgs: '',
-				content: {},
-				createdAt: new Date().toISOString(),
-				playTimeMinutes: 0
-			};
-			this.instances.push(defaultJava);
-			this.saveInstances();
+		} else {
+			let changed = false;
+			// Minecraft Rust 26.3 é o padrão de todo mundo: quem não tem ganha de volta, no topo.
+			if (!this.instances.some((i) => i.loader === 'horizon-rust')) {
+				this.instances.unshift(makeDefaultRust());
+				changed = true;
+			}
+			if (!this.instances.some((i) => i.loader !== 'horizon-rust')) {
+				const defaultJava: Instance = {
+					id: 'tropicaliacraft-java',
+					name: 'TropicaliaCraft (Java)',
+					gameVersion: '1.20.1',
+					loader: 'fabric',
+					engine: 'java',
+					icon: DEFAULT_LOADER_ICON.fabric,
+					javaRenderer: this.settings.defaultJavaRenderer || 'opengles_mobileglues',
+					useAngle: this.settings.defaultUseAngle || false,
+					javaRuntime: '',
+					memory: { minMb: 1024, maxMb: this.settings.defaultMemoryMb || 2048 },
+					jvmArgs: '',
+					content: {},
+					createdAt: new Date().toISOString(),
+					playTimeMinutes: 0
+				};
+				this.instances.push(defaultJava);
+				changed = true;
+			}
+			for (const inst of this.instances) {
+				if (!inst.icon) {
+					inst.icon = DEFAULT_LOADER_ICON[inst.loader] ?? 'grass';
+					changed = true;
+				}
+				if (inst.loader === 'horizon-rust') {
+					const beforeCount = Object.keys(inst.content).length;
+					seedHorizonInstanceMods(inst);
+					if (Object.keys(inst.content).length !== beforeCount) changed = true;
+				}
+			}
+			if (changed) this.saveInstances();
+		}
+
+		// Sem instância escolhida (primeira vez, ou a escolhida foi apagada): começa no Rust.
+		if (!this.instances.some((i) => i.id === this.settings.lastInstanceId)) {
+			const rust = this.instances.find((i) => i.id === 'tropicaliacraft-rust') ?? this.instances.find((i) => i.loader === 'horizon-rust');
+			if (rust) {
+				this.settings.lastInstanceId = rust.id;
+				this.saveSettings();
+			}
+		}
+		// O servidor oficial aponta para uma instância que existe (padrão: Rust).
+		const official = this.savedServers.find((s) => s.builtin);
+		if (official && !this.instances.some((i) => i.id === official.instanceId)) {
+			official.instanceId = this.instances.find((i) => i.loader === 'horizon-rust')?.id ?? this.instances[0]?.id;
+			this.saveSavedServers();
 		}
 
 		if (isTauri) {
@@ -259,6 +315,11 @@ class App {
 
 	async #listen() {
 		await on<ProgressEvent>('launcher://progress', (p) => {
+            // Content belongs to the command promise. Late download events must
+            // never resurrect a finished install or replace a launch task.
+            if (p.stage === 'content' || p.stage === 'content-finished' || this.contentOperations[p.owner] || this.running[p.owner]) return;
+
+
 			const t = (this.tasks[p.owner] ??= { stage: p.stage, current: 0, total: 0, message: '', busy: true });
 			t.stage = p.stage;
 			t.current = p.current;
@@ -277,6 +338,7 @@ class App {
 		await on<{ owner: string; code: number | null }>('game://exit', ({ owner, code }) => {
 			const started = this.running[owner];
 			delete this.running[owner];
+            delete this.tasks[owner];
 			const inst = this.instances.find((i) => i.id === owner);
 			if (inst && started) {
 				inst.playTimeMinutes += Math.round((Date.now() - started) / 60000);
@@ -302,10 +364,75 @@ class App {
 		});
 	}
 
-	saveSettings = () => kv.set('settings', this.settings);
-	saveAccounts = () => kv.set('accounts', this.accounts);
-	saveInstances = () => kv.set('instances', this.instances);
-	saveServers = () => kv.set('servers', this.servers);
+	saveSettings = () => kv.set('settings', $state.snapshot(this.settings));
+	saveAccounts = () => kv.set('accounts', $state.snapshot(this.accounts));
+	saveInstances = () => kv.set('instances', $state.snapshot(this.instances));
+	saveServers = () => kv.set('servers', $state.snapshot(this.servers));
+	saveSavedServers = () => kv.set('savedServers', $state.snapshot(this.savedServers));
+
+	addSavedServer(p: Pick<SavedServer, 'name' | 'address'> & Partial<SavedServer>) {
+		const address = p.address.trim();
+		if (!address) throw new Error('Informe o endereço do servidor.');
+		if (this.savedServers.some((s) => s.address.toLowerCase() === address.toLowerCase())) {
+			throw new Error('Esse servidor já está na lista.');
+		}
+		const srv: SavedServer = { addedAt: new Date().toISOString(), ...p, address, name: p.name.trim() || address, id: `saved-${uid()}` };
+		this.savedServers.push(srv);
+		this.saveSavedServers();
+		void this.pingServer(address);
+		return srv;
+	}
+
+	updateSavedServer(id: string, patch: Partial<SavedServer>) {
+		const s = this.savedServers.find((x) => x.id === id);
+		if (!s) return;
+		Object.assign(s, s.builtin ? { instanceId: patch.instanceId ?? s.instanceId } : patch);
+		this.saveSavedServers();
+	}
+
+	removeSavedServer(id: string) {
+		this.savedServers = this.savedServers.filter((s) => s.builtin || s.id !== id);
+		this.saveSavedServers();
+	}
+
+	/** Ping real (Server List Ping) feito pelo próprio aparelho. */
+	async pingServer(address: string) {
+		const key = address.trim().toLowerCase();
+		if (!key || this.pings[key] === 'loading') return;
+		this.pings[key] = 'loading';
+		try {
+			this.pings[key] = isTauri ? await call<PingResult>('server_ping', { address: key }) : await webPing(key);
+		} catch (e) {
+			this.pings[key] = { online: false, error: errorMessage(e) };
+		}
+	}
+
+	ping(address: string): PingResult | 'loading' | undefined {
+		return this.pings[address.trim().toLowerCase()];
+	}
+
+	/** Escuta os mundos "Abrir para LAN" e servidores anunciados na rede local. */
+	async scanLan() {
+		if (!isTauri || this.lanScanning) return;
+		this.lanScanning = true;
+		try {
+			this.lanServers = await call<LanServer[]>('lan_scan', { durationMs: 3500 });
+			for (const s of this.lanServers) void this.pingServer(s.address);
+		} catch (e) {
+			console.warn('LAN indisponível', e);
+		} finally {
+			this.lanScanning = false;
+		}
+	}
+
+	async installContent<T>(ownerId: string, operation: () => Promise<T>): Promise<T> {
+		if (this.running[ownerId] || this.tasks[ownerId]?.busy || this.contentOperations[ownerId]) {
+			throw new Error('Encerre o jogo ou aguarde a operação atual antes de alterar os mods.');
+		}
+		this.contentOperations[ownerId] = true;
+		try { return await operation(); }
+		finally { delete this.contentOperations[ownerId]; }
+	}
 
 	// -------------------------------------------------------------- contas
 
@@ -330,7 +457,7 @@ class App {
 
 	/** Login Microsoft: mostra o código via `onCode` e resolve quando o usuário aprovar. */
 	async loginMicrosoft(onCode: (c: ms.DeviceCode) => void, signal: AbortSignal) {
-		const clientId = this.settings.msClientId.trim();
+		const clientId = this.settings.msClientId.trim() || ms.DEFAULT_MS_CLIENT_ID;
 		const code = await ms.requestDeviceCode(clientId);
 		onCode(code);
 		const token = await ms.pollDeviceCode(clientId, code, signal);
@@ -376,7 +503,7 @@ class App {
 		if (!token || !acc.tokenExpiresAt || acc.tokenExpiresAt < Date.now() + 5 * 60_000) {
 			const refresh = await secrets.get(`ms-refresh-${acc.id}`);
 			if (!refresh) throw new Error('Sessão Microsoft expirada. Remova e adicione a conta de novo.');
-			const s = await ms.refreshSession(this.settings.msClientId.trim(), refresh);
+			const s = await ms.refreshSession(this.settings.msClientId.trim() || ms.DEFAULT_MS_CLIENT_ID, refresh);
 			await this.#storeSession(acc.id, s);
 			token = s.accessToken;
 			acc.tokenExpiresAt = s.expiresAt;
@@ -404,16 +531,22 @@ class App {
 			...p,
 			id
 		};
-		this.instances.push(inst);
+		this.instances = [inst, ...this.instances.filter((i) => i.id !== inst.id)];
+		if (!this.settings.lastInstanceId) {
+			this.settings.lastInstanceId = inst.id;
+			this.saveSettings();
+		}
 		this.saveInstances();
 		return inst;
 	}
 
-	updateInstance(id: string, patch: Partial<Instance>) {
+	async updateInstance(id: string, patch: Partial<Instance>) {
 		const i = this.instances.find((x) => x.id === id);
 		if (!i) return;
-		Object.assign(i, patch);
-		this.saveInstances();
+		const previous = $state.snapshot(i);
+        Object.assign(i, $state.snapshot(patch));
+        try { await this.saveInstances(); }
+        catch (error) { Object.assign(i, previous); throw error; }
 	}
 
 	async cloneInstance(src: Instance, name: string) {
@@ -442,6 +575,8 @@ class App {
 
 	// -------------------------------------------------------------- jogar
 
+	launchPresentation = $state(false);
+
 	async play(inst: Instance, serverAddress?: string) {
 		const acc = this.activeAccount;
 		if (!acc) {
@@ -449,16 +584,37 @@ class App {
 			throw new Error('Adicione uma conta (Microsoft ou offline) para jogar.');
 		}
 		if (this.running[inst.id] || this.tasks[inst.id]?.busy) return;
+		if (this.contentOperations[inst.id]) throw new Error('Aguarde a instalação dos mods.');
+		if (this.system.os === 'android' && (Object.keys(this.running).length || Object.values(this.tasks).some((t) => t.busy))) {
+			throw new Error('Aguarde ou encerre a instância atual antes de abrir outra no Android.');
+		}
 		this.tasks[inst.id] = { stage: 'versions', current: 0, total: 1, message: 'Preparando…', busy: true };
+		// A instância que acabou de receber play vira a mais recente na hora: as listas a
+		// levam para o topo e o jogador vê a barra de progresso sem procurar.
+		const previousPlayedAt = inst.lastPlayedAt;
+		inst.lastPlayedAt = new Date().toISOString();
 		try {
+			if (inst.loader === 'horizon-rust' && isTauri) {
+				await ensureHorizonModsInstalled(inst);
+				await this.saveInstances();
+			}
 			const account = await this.launchAuth(acc);
 			const profile = PERF_PROFILES[this.settings.perfProfile];
 			const jvmArgs = [...profile.flags.split(/\s+/), ...inst.jvmArgs.split(/\s+/)].filter(Boolean);
+			if (this.system.os === 'android') {
+				// A broken layout must never block the game: the engines keep their own defaults.
+				await this.applyControls().catch((e) => console.warn('Controles de toque não aplicados', e));
+			}
+			if (this.system.os !== 'android' && inst.loader !== 'horizon-rust' && inst.engine !== 'rust') {
+				this.launchPresentation = true;
+				await new Promise((resolve) => setTimeout(resolve, 2800));
+			}
 			await call('game_launch', {
 				req: {
 					instanceId: inst.id,
 					engine: inst.engine ?? (inst.loader === 'horizon-rust' ? 'rust' : 'java'),
 					gameVersion: inst.gameVersion,
+					language: ({ pt: 'pt_br', en: 'en_us', es: 'es_es' } as const)[detectLanguage()],
 					loader: inst.loader,
 					loaderVersion: inst.loaderVersion ?? null,
 					account,
@@ -498,8 +654,17 @@ class App {
 			this.saveSettings();
 		} catch (e) {
 			delete this.tasks[inst.id];
+			inst.lastPlayedAt = previousPlayedAt;
 			throw e;
+		} finally {
+			this.launchPresentation = false;
 		}
+	}
+
+	/** Renders the shared touch layout and hands it to both Android engines. */
+	async applyControls() {
+		const bundle = await buildControlsBundle(normalizeControls(this.settings.controls), landscapeHeightDp());
+		await call('controls_apply', { bundle });
 	}
 
 	async stopGame(id: string) {
@@ -538,7 +703,13 @@ class App {
 			const jar = srv.customJarUrl?.trim()
 				? { url: srv.customJarUrl.trim(), label: `${engine(srv.engine).name} (JAR manual)` }
 				: await resolveJar(srv.engine, srv.minecraftVersion, srv.flavor);
-			await call('server_install', { serverId: srv.id, url: jar.url, sha1: null });
+			await call('server_install', {
+				serverId: srv.id,
+				url: jar.url,
+				sha1: jar.sha1 ?? null,
+				installer: !srv.customJarUrl?.trim() && !!engine(srv.engine).installer,
+				minecraftVersion: srv.minecraftVersion
+			});
 			const current = await call<Record<string, string>>('server_read_properties', { serverId: srv.id });
 			if (!Object.keys(current).length) {
 				await call('server_write_properties', { serverId: srv.id, values: DEFAULT_PROPERTIES });
@@ -588,6 +759,39 @@ class App {
 		this.servers = this.servers.filter((s) => s.id !== id);
 		this.saveServers();
 	}
+}
+
+export const OFFICIAL_SERVER: SavedServer = {
+	id: 'tropicaliacraft',
+	name: 'TropicaliaCraft',
+	address: 'tropicaliacraft.gustavolara.pro',
+	instanceId: 'tropicaliacraft-rust',
+	builtin: true,
+	addedAt: '2026-01-01T00:00:00.000Z'
+};
+
+/** O servidor oficial vem adicionado de fábrica e fica sempre no topo. */
+function withOfficialServer(list: SavedServer[]): SavedServer[] {
+	const own = list.find((s) => s.builtin);
+	const rest = list.filter((s) => !s.builtin && s.address.toLowerCase() !== OFFICIAL_SERVER.address);
+	return [{ ...OFFICIAL_SERVER, instanceId: own?.instanceId ?? OFFICIAL_SERVER.instanceId }, ...rest];
+}
+
+/** No navegador (npm run dev) não há socket TCP: usa a API pública do mcsrvstat. */
+async function webPing(address: string): Promise<PingResult> {
+	const r = await fetch(`https://api.mcsrvstat.us/3/${encodeURIComponent(address)}`);
+	const j = await r.json();
+	return {
+		online: !!j.online,
+		// A latência aqui seria a da API, não a do servidor: só o app mede de verdade.
+		latencyMs: null,
+		motd: Array.isArray(j.motd?.raw) ? j.motd.raw.join('\n') : undefined,
+		favicon: j.icon ?? null,
+		playersOnline: j.players?.online ?? null,
+		playersMax: j.players?.max ?? null,
+		sample: (j.players?.list ?? []).map((p: { name: string }) => p.name),
+		version: j.version ?? null
+	};
 }
 
 export const app = new App();

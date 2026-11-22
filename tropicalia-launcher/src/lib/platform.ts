@@ -28,7 +28,7 @@ export class HttpError extends Error {
 }
 
 export async function getJson<T>(url: string, init: RequestInit = {}): Promise<T> {
-	const res = await http(url, { ...init, headers: { Accept: 'application/json', ...(init.headers ?? {}) } });
+	const res = await http(url, { ...init, signal: init.signal ?? AbortSignal.timeout(30000), headers: { Accept: 'application/json', ...(init.headers ?? {}) } });
 	if (!res.ok) throw new HttpError(res.status, await res.text().catch(() => ''), url);
 	return res.json() as Promise<T>;
 }
@@ -76,7 +76,13 @@ function store(): Promise<Store> {
 		if (isTauri) {
 			const { load } = await import('@tauri-apps/plugin-store');
 			const s = await load('launcher.json', { autoSave: 250, defaults: {} });
-			return { get: (k) => s.get(k), set: (k, v) => s.set(k, v) };
+			return {
+				get: (k) => s.get(k),
+				set: async (k, v) => {
+					await s.set(k, v);
+					await s.save();
+				}
+			};
 		}
 		return {
 			async get<T>(k: string) {
@@ -90,9 +96,9 @@ function store(): Promise<Store> {
 			async set(k, v) {
 				try {
 					localStorage.setItem(`tropicalia:${k}`, JSON.stringify(v));
-				} catch {
-					/* modo privado */
-				}
+					} catch (error) {
+						throw new Error('Não foi possível salvar neste dispositivo.', { cause: error });
+					}
 			}
 		};
 	})();

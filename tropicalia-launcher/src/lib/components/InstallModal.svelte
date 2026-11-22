@@ -9,11 +9,11 @@
 	import { call } from '$lib/platform';
 	import {
 		loadersFor,
+		applyInstallPlan,
 		planInstall,
 		pickBest,
 		primaryFile,
 		projectVersions,
-		toInstalled,
 		type ModrinthVersion,
 		type PlannedInstall,
 		type SearchHit
@@ -133,7 +133,7 @@
 			return;
 		}
 
-		const installed = new Set(Object.values(c.owner.content).map((x) => x.projectId).filter(Boolean) as string[]);
+		const installed = new Set(Object.values(c.owner.content).filter(x => !x.filename.endsWith('.disabled')).map((x) => x.projectId).filter(Boolean) as string[]);
 		installed.delete(p.project_id); // permite reinstalar/atualizar o próprio projeto
 		planInstall({ id: p.project_id, title: p.title, iconUrl: p.icon_url }, { kind, loaders: c.loaders, gameVersion: c.gameVersion, installed })
 			.then((r) => {
@@ -148,7 +148,7 @@
 	const deps = $derived(plan.filter((p) => !p.root));
 	const totalSize = $derived(plan.reduce((s, p) => s + p.file.size, 0));
 
-	async function install(withDeps: boolean) {
+	async function install() {
 		const c = ctx;
 		if (!c) return;
 
@@ -158,7 +158,7 @@
 				const reg = await getHorizonRegistry();
 				const mod = reg.projects.find((x) => x.id === project?.project_id);
 				if (!mod) throw new Error('Mod Horizon não encontrado.');
-				await installHorizonMod(c.owner as any, mod);
+				await app.installContent(c.owner.id, () => installHorizonMod(c.owner as any, mod));
 				app.saveInstances();
 				toasts.ok(`${mod.name} instalado em ${c.owner.name}`);
 				open = false;
@@ -169,24 +169,11 @@
 			}
 			return;
 		}
-		const items = withDeps ? plan : plan.filter((p) => p.root);
+		const items = plan;
 		installing = true;
 		try {
-			// remove versão antiga do mesmo projeto
-			for (const old of Object.values(c.owner.content).filter((x) => items.some((p) => p.project.id === x.projectId))) {
-				if (!items.some((p) => p.file.filename === old.filename)) {
-					await call('content_delete', { ownerKind: c.ownerKind, ownerId: c.owner.id, kind: old.kind, filename: old.filename }).catch(() => {});
-					delete c.owner.content[old.filename];
-				}
-			}
-			await call('content_install', {
-				ownerKind: c.ownerKind,
-				ownerId: c.owner.id,
-				kind,
-				files: items.map((p) => ({ url: p.file.url, filename: p.file.filename, sha1: p.file.hashes.sha1, size: p.file.size }))
-			});
-			app.recordContent(c.owner, items.map((p) => toInstalled(p, kind)));
-			c.ownerKind === 'instance' ? app.saveInstances() : app.saveServers();
+			await app.installContent(c.owner.id, () => applyInstallPlan(items, kind, c));
+			await (c.ownerKind === 'instance' ? app.saveInstances() : app.saveServers());
 			toasts.ok(`${project?.title} instalado${items.length > 1 ? ` com ${items.length - 1} dependência(s)` : ''} em ${c.owner.name}`);
 			open = false;
 		} catch (e) {
@@ -210,10 +197,10 @@
 			modpack: { projectId: project.project_id, versionId: v.id, name: project.title }
 		});
 		try {
-			const res = await call<{ dependencies: Record<string, string>; files: number }>('mrpack_install', {
+			const res = await app.installContent(inst.id, () => call<{ dependencies: Record<string, string>; files: number }>('mrpack_install', {
 				instanceId: inst.id,
 				source: primaryFile(v).url
-			});
+			}));
 			const d = res.dependencies;
 			const mc = d.minecraft ?? inst.gameVersion;
 			const patch =
@@ -239,7 +226,7 @@
 	const task = $derived(ctx ? app.tasks[ctx.owner.id] : undefined);
 </script>
 
-<Modal bind:open title={kind === 'modpack' ? 'Instalar modpack' : `Instalar ${project?.title ?? ''}`} width={620}>
+<Modal bind:open title={kind === 'modpack' ? 'Instalar modpack' : `Instalar ${project?.title ?? ''}`} width={620} dismissable={!installing}>
 	{#if project}
 		<div class="mb-4 flex items-center gap-3">
 			{#if project.icon_url}<img src={project.icon_url} alt="" class="h-12 w-12 rounded-sm" />{:else}<BlockIcon size={48} />{/if}
@@ -314,10 +301,7 @@
 		{#if kind === 'modpack'}
 			<PixelButton variant="emerald" icon={Download} loading={installing} disabled={!packVersionId} onclick={installModpack}>Instalar modpack</PixelButton>
 		{:else}
-			{#if deps.length}
-				<PixelButton loading={installing} disabled={resolving || !plan.length} onclick={() => install(false)}>Só ele</PixelButton>
-			{/if}
-			<PixelButton variant="emerald" icon={Download} loading={installing} disabled={resolving || !plan.length} onclick={() => install(true)}>
+			<PixelButton variant="emerald" icon={Download} loading={installing} disabled={resolving || !plan.length} onclick={install}>
 				{deps.length ? `Instalar tudo (${plan.length})` : 'Instalar'} · {formatBytes(totalSize)}
 			</PixelButton>
 		{/if}

@@ -55,20 +55,38 @@ export function errorMessage(e: unknown) {
 }
 
 export const LOADER_LABEL: Record<string, string> = {
-	vanilla: 'Vanilla',
+	'horizon-rust': 'Rust',
 	fabric: 'Fabric',
-	quilt: 'Quilt',
+	vanilla: 'Vanilla',
 	forge: 'Forge',
-	neoforge: 'NeoForge',
-	'horizon-rust': 'Horizon (Rust Nativo)'
+	quilt: 'Quilt',
+	neoforge: 'NeoForge'
+};
+
+export const LOADER_TONE: Record<string, 'green' | 'blue' | 'gold' | 'purple' | 'muted'> = {
+	'horizon-rust': 'green',
+	fabric: 'blue',
+	vanilla: 'muted',
+	forge: 'gold',
+	quilt: 'purple',
+	neoforge: 'gold'
 };
 
 export const BLOCK_ICONS = {
 	creeper: '/images/tropi_creeper.png',
-	grass: '/images/grass-block-side.png',
-	stone: '/images/stone.jpg',
 	diamond: '/images/diamond_block.jpg',
+	grass: '/images/grass-block-side.png',
 	gold: '/images/gold_block.jpg',
 	iron: '/images/iron_block.jpg',
+	stone: '/images/stone.jpg',
 	steve: '/images/steve-head.png'
 } as const;
+
+export const DEFAULT_LOADER_ICON: Record<string, keyof typeof BLOCK_ICONS> = {
+	'horizon-rust': 'creeper',
+	fabric: 'diamond',
+	vanilla: 'grass',
+	forge: 'gold',
+	neoforge: 'iron',
+	quilt: 'stone'
+};

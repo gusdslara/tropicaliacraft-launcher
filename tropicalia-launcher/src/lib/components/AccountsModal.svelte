@@ -5,12 +5,11 @@
 	import Badge from './Badge.svelte';
 	import { app, toasts } from '$lib/state.svelte';
 	import { openUrl } from '$lib/platform';
-	import type { DeviceCode } from '$lib/services/microsoft-auth';
+	import { DEFAULT_MS_CLIENT_ID, type DeviceCode } from '$lib/services/microsoft-auth';
 	import { isValidNick, offlineUuid } from '$lib/util/offline-uuid';
 	import { errorMessage } from '$lib/util/format';
-	import { Check, Copy, ExternalLink, Trash2, UserPlus, WifiOff } from 'lucide-svelte';
+	import { Check, Copy, ExternalLink, Key, RotateCcw, Trash2, UserPlus, WifiOff } from 'lucide-svelte';
 	import QRCode from 'qrcode';
-	import { goto } from '$app/navigation';
 
 	let view = $state<'list' | 'microsoft' | 'offline'>('list');
 	let nick = $state('');
@@ -18,6 +17,8 @@
 	let qr = $state('');
 	let error = $state('');
 	let copied = $state(false);
+	let showClientConfig = $state(false);
+	let customClientId = $state('');
 	let controller: AbortController | null = null;
 
 	const nickOk = $derived(isValidNick(nick));
@@ -30,13 +31,23 @@
 		qr = '';
 		error = '';
 		nick = '';
+		showClientConfig = false;
 		view = 'list';
+	}
+
+	function restoreDefaultClientId() {
+		app.settings.msClientId = DEFAULT_MS_CLIENT_ID;
+		customClientId = DEFAULT_MS_CLIENT_ID;
+		app.saveSettings();
+		toasts.ok('Client ID padrão restaurado!');
+		startMicrosoft();
 	}
 
 	async function startMicrosoft() {
 		view = 'microsoft';
 		error = '';
 		code = null;
+		customClientId = app.settings.msClientId || DEFAULT_MS_CLIENT_ID;
 		controller = new AbortController();
 		try {
 			const acc = await app.loginMicrosoft(async (c) => {
@@ -104,36 +115,54 @@
 				<img src="/images/grass-block-side.png" alt="" class="pixel h-9 w-9" />
 				<span>
 					<b class="font-mc mc-shadow-sm text-[12px] text-white">Conta Microsoft</b>
-					<small>Login oficial (Xbox/Mojang)</small>
+					<small>Login oficial direto (Xbox/Mojang)</small>
 				</span>
 			</button>
 			<button class="add" onclick={() => (view = 'offline')}>
 				<WifiOff size={30} class="text-[#fbbf24]" />
 				<span>
 					<b class="font-mc mc-shadow-sm text-[12px] text-white">Perfil offline</b>
-					<small>LAN e servidores offline</small>
+					<small>Nickname para LAN e servidores offline</small>
 				</span>
 			</button>
 		</div>
 	{:else if view === 'microsoft'}
 		{#if error}
 			<div class="err selectable">{error}</div>
-			<div class="mt-4 flex justify-end gap-2">
-				<PixelButton variant="ghost" onclick={reset}>Voltar</PixelButton>
-				{#if !app.settings.msClientId}
-					<PixelButton onclick={() => { reset(); app.accountsOpen = false; goto('/ajustes'); }}>Abrir Ajustes</PixelButton>
-				{:else}
+			<div class="mt-4 flex flex-wrap items-center justify-between gap-2">
+				<div class="flex gap-2">
+					<PixelButton size="sm" variant="ghost" onclick={() => (showClientConfig = !showClientConfig)} icon={Key}>
+						{showClientConfig ? 'Ocultar ID' : 'Configurar Client ID'}
+					</PixelButton>
+					<PixelButton size="sm" variant="ghost" onclick={restoreDefaultClientId} icon={RotateCcw}>
+						Usar ID padrão
+					</PixelButton>
+				</div>
+				<div class="flex gap-2">
+					<PixelButton variant="ghost" onclick={reset}>Voltar</PixelButton>
 					<PixelButton variant="emerald" onclick={startMicrosoft}>Tentar de novo</PixelButton>
-				{/if}
+				</div>
 			</div>
+
+			{#if showClientConfig}
+				<div class="mt-3 p-3 bg-[#0c1410] border border-[#1b2b22] text-[12px] space-y-2">
+					<label class="tp-label" for="acc-cid">Client ID do Azure (Entra ID)</label>
+					<div class="flex gap-2">
+						<input id="acc-cid" class="tp-input font-mono text-xs" bind:value={customClientId} />
+						<PixelButton size="sm" variant="emerald" onclick={() => { app.settings.msClientId = customClientId.trim(); app.saveSettings(); startMicrosoft(); }}>
+							Salvar
+						</PixelButton>
+					</div>
+				</div>
+			{/if}
 		{:else if !code}
-			<div class="tp-muted flex items-center gap-3 py-8 text-[13px]"><span class="spinner"></span> Pedindo um código para a Microsoft…</div>
+			<div class="tp-muted flex items-center gap-3 py-8 text-[13px]"><span class="spinner"></span> Conectando com a Microsoft…</div>
 		{:else}
 			<div class="flex flex-col sm:grid sm:grid-cols-[1fr_auto] items-center gap-6">
 				<div>
 					<p class="text-[13px] text-[#c7d5cc]">1. Abra <b class="text-white">microsoft.com/link</b> no PC ou celular</p>
-					<p class="mt-1 text-[13px] text-[#c7d5cc]">2. Digite o código abaixo e entre com sua conta</p>
-					<button class="code" onclick={copyCode} title="Copiar código">
+					<p class="mt-1 text-[13px] text-[#c7d5cc]">2. Digite o código abaixo e autorize sua conta</p>
+					<button class="code" onclick={copyCode} title="Clique para copiar">
 						<span class="font-mc mc-shadow">{code.user_code}</span>
 						{#if copied}<Check size={18} />{:else}<Copy size={18} />{/if}
 					</button>
@@ -141,7 +170,32 @@
 						<PixelButton variant="emerald" size="sm" icon={ExternalLink} onclick={() => openUrl(linkWithCode)}>Abrir página</PixelButton>
 						<PixelButton variant="ghost" size="sm" onclick={reset}>Cancelar</PixelButton>
 					</div>
-					<p class="tp-muted mt-4 flex items-center gap-2 text-xs"><span class="spinner sm"></span> Aguardando você aprovar… (o launcher nunca vê sua senha)</p>
+					<p class="tp-muted mt-4 flex items-center gap-2 text-xs"><span class="spinner sm"></span> Aguardando sua autorização… (o launcher nunca tem acesso à sua senha)</p>
+
+					<div class="mt-4 pt-3 border-t border-[#18261e] flex items-center justify-between">
+						<button
+							type="button"
+							class="text-[11px] text-[#6ee7b7] hover:underline bg-transparent border-0 cursor-pointer p-0"
+							onclick={() => (showClientConfig = !showClientConfig)}
+						>
+							{showClientConfig ? 'Ocultar Client ID' : 'Client ID do Azure: ' + (app.settings.msClientId ? app.settings.msClientId.slice(0, 8) + '…' : 'Padrão')}
+						</button>
+					</div>
+
+					{#if showClientConfig}
+						<div class="mt-2 p-2.5 bg-[#0b100e] border border-[#1b2b22] text-[11.5px] space-y-2">
+							<label class="tp-label text-[11px]" for="acc-cid-active">Client ID ativo</label>
+							<div class="flex gap-1.5">
+								<input id="acc-cid-active" class="tp-input font-mono text-[11px]" bind:value={customClientId} />
+								<PixelButton size="xs" variant="emerald" onclick={() => { app.settings.msClientId = customClientId.trim(); app.saveSettings(); startMicrosoft(); }}>
+									Trocar
+								</PixelButton>
+								<PixelButton size="xs" variant="ghost" onclick={restoreDefaultClientId}>
+									Padrão
+								</PixelButton>
+							</div>
+						</div>
+					{/if}
 				</div>
 				<div class="qr">
 					<img src={qr} alt="QR code para login" width="150" height="150" class="pixel" />
@@ -151,11 +205,11 @@
 		{/if}
 	{:else}
 		<form onsubmit={(e) => (e.preventDefault(), createOffline())}>
-			<label class="tp-label" for="nick">Nickname</label>
+			<label class="tp-label" for="nick">Nickname / Nome de Jogador</label>
 			<input id="nick" class="tp-input font-mono" bind:value={nick} maxlength="16" placeholder="Steve" autocomplete="off" />
 			<p class="tp-help">3 a 16 caracteres: letras, números e _. Funciona em LAN e servidores com <code>online-mode=false</code>.</p>
 			{#if nickOk}
-				<p class="tp-muted mt-3 font-mono text-[11px]">UUID offline: {offlineUuid(nick.trim())}</p>
+				<p class="tp-muted mt-3 font-mono text-[11px]">UUID offline gerado: {offlineUuid(nick.trim())}</p>
 			{/if}
 			<div class="mt-5 flex justify-end gap-2">
 				<PixelButton variant="ghost" onclick={reset}>Voltar</PixelButton>

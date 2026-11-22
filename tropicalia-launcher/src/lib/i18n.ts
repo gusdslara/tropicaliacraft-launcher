@@ -23,7 +23,7 @@ export const i18n = {
 		instructions: {
 			title: 'Instruções de Instalação e Uso',
 			android: 'Android: Abra o arquivo APK baixado no seu celular e permita a instalação de fontes desconhecidas se solicitado.',
-			windows: 'Windows: Execute o instalador ou descompacte o arquivo portable e inicie o Tropicalia Launcher.',
+			windows: 'Windows: Execute o instalador ou descompacte o arquivo portable e inicie o TropicaliaLauncher.',
 			linux: 'Linux: No Ubuntu/Debian instale com "sudo dpkg -i TropicaliaLauncher*.deb" ou execute o binário diretamente com "chmod +x".'
 		}
 	},
@@ -41,7 +41,7 @@ export const i18n = {
 		instructions: {
 			title: 'Installation and Usage Instructions',
 			android: 'Android: Open the downloaded APK on your device and allow installation from unknown sources if prompted.',
-			windows: 'Windows: Run the setup installer or unpack the portable executable and start Tropicalia Launcher.',
+			windows: 'Windows: Run the setup installer or unpack the portable executable and start TropicaliaLauncher.',
 			linux: 'Linux: On Ubuntu/Debian install with "sudo dpkg -i TropicaliaLauncher*.deb" or run the binary directly with "chmod +x".'
 		}
 	},
@@ -59,7 +59,7 @@ export const i18n = {
 		instructions: {
 			title: 'Instrucciones de Instalación e Uso',
 			android: 'Android: Abre el archivo APK descargado en tu dispositivo y permite la instalación de fuentes desconocidas si se te solicita.',
-			windows: 'Windows: Ejecuta el instalador o descomprime el ejecutable portable e inicia Tropicalia Launcher.',
+			windows: 'Windows: Ejecuta el instalador o descomprime el ejecutable portable e inicia TropicaliaLauncher.',
 			linux: 'Linux: En Ubuntu/Debian instala con "sudo dpkg -i TropicaliaLauncher*.deb" o ejecuta el binario con "chmod +x".'
 		}
 	}

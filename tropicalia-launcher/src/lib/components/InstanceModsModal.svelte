@@ -1,16 +1,22 @@
 <!-- Modal de Gerenciamento de Mods e Conteúdo (Suporta .hnmod/.hmod Horizon Rust e .jar Java) -->
 <script lang="ts">
+    import { tr } from '$lib/ui-text';
 	import Modal from './Modal.svelte';
+    import { untrack } from 'svelte';
 	import PixelButton from './PixelButton.svelte';
 	import TabSelector from './TabSelector.svelte';
 	import Badge from './Badge.svelte';
+	import BlockIcon from './BlockIcon.svelte';
 	import Toggle from './Toggle.svelte';
 	import ContentPickerInline from './ContentPickerInline.svelte';
 	import { app, toasts } from '$lib/state.svelte';
 	import { call, isTauri, openFolder } from '$lib/platform';
 	import { loadersFor } from '$lib/services/modrinth';
 	import {
-		DEFAULT_ENABLED_MOD_IDS,
+		supportedHorizonNativeMods,
+        getHorizonRegistry,
+        installHorizonMod,
+        DEFAULT_ENABLED_MOD_IDS,
 		HORIZON_CATEGORIES,
 		OFFICIAL_HORIZON_MODS,
 		fetchHorizonModsState,
@@ -21,7 +27,7 @@
 		type OfficialHorizonMod
 	} from '$lib/services/horizon-mods';
 	import type { ContentKind, Instance, InstalledContent } from '$lib/types';
-	import { formatBytes, LOADER_LABEL } from '$lib/util/format';
+	import { formatBytes, LOADER_LABEL, LOADER_TONE } from '$lib/util/format';
 	import {
 		Check,
 		CheckCheck,
@@ -66,6 +72,8 @@
 		version?: string;
 		size: number;
 		enabled: boolean;
+        installed?: boolean;
+        supported?: boolean;
 		kind: 'mod' | 'native-mod' | 'shader' | 'resourcepack';
 		category?: HorizonModCategory;
 		iconUrl?: string;
@@ -76,10 +84,28 @@
 	let rows = $state<ModRow[]>([]);
 	let loadingRows = $state(false);
 	let filter = $state('');
-	let selectedCategory = $state<HorizonModCategory>('all');
 	let statusFilter = $state<'all' | 'enabled' | 'disabled'>('all');
 	let addInlineOpen = $state(false);
 	let kind = $state<ContentKind>('mod');
+    let baseline = $state<Record<string, boolean>>({});
+    let saving = $state(false);
+    let modsModal: { close(): void } | undefined;
+    const dirty = $derived(rows.some(r => r.enabled !== baseline[r.filename]));
+    async function saveMods() {
+        if (!instance || saving) return;
+        saving = true;
+        try {
+            await app.installContent(instance.id, async () => {
+                for (const r of rows) {
+                    if (r.enabled !== baseline[r.filename] || (isHorizon && r.enabled && !r.installed)) await persistMod(r, r.enabled);
+                }
+                await app.saveInstances();
+            });
+            await loadRows();
+        } catch (e) { toasts.err(e); throw e; }
+        finally { saving = false; }
+    }
+
 
 	const isHorizon = $derived(
 		instance?.loader === 'horizon-rust' ||
@@ -90,7 +116,7 @@
 
 	const contentTabs = $derived([
 		{ id: 'mod', label: isHorizon ? 'Mods Rust (.hnmod)' : 'Mods (.jar)', disabled: instance?.loader === 'vanilla' },
-		{ id: 'resourcepack', label: 'Texturas' },
+		{ id: 'resourcepack', label: tr("Texturas") },
 		{ id: 'shader', label: 'Shaders' },
 		{ id: 'datapack', label: 'Data packs' }
 	]);
@@ -103,6 +129,7 @@
 			if (isHorizon) {
 				// 1. Instância Horizon Rust: Carrega estado de horizon-mods.txt
 				const statesOnDisk = await fetchHorizonModsState(instance.id);
+                const native = await supportedHorizonNativeMods(instance);
 				const hasDiskStates = Object.keys(statesOnDisk).length > 0;
 
 				// 2. Se a instância ainda não tiver conteúdo populado, semeia os mods recomendados
@@ -115,11 +142,11 @@
 				let localFiles: Array<{ filename: string; enabled: boolean; size: number }> = [];
 				if (isTauri) {
 					try {
-						localFiles = await call<Array<{ filename: string; enabled: boolean; size: number }>>('content_list', {
-							ownerKind: 'instance',
-							ownerId: instance.id,
-							kind: 'mod'
-						});
+						for (const contentKind of ['horizon-mod', 'shader', 'resourcepack']) {
+                            localFiles.push(...await call<Array<{filename: string; enabled: boolean; size: number}>>('content_list', {
+                                ownerKind: 'instance', ownerId: instance.id, kind: contentKind
+                            }));
+                        }
 					} catch (e) {
 						// Ignora erro de pasta vazia
 					}
@@ -138,8 +165,10 @@
 						enabled = mod.defaultEnabled;
 					}
 
-					return {
-						id: mod.id,
+					const supported = !mod.filename.endsWith('.hnmod') || native.has(mod.id);
+                    return {
+                        supported,
+                        id: mod.id,
 						filename: mod.filename,
 						name: mod.name,
 						summary: mod.summary,
@@ -147,21 +176,23 @@
 						author: mod.author,
 						version: mod.version,
 						size: mod.size,
-						enabled,
+						enabled: enabled && supported,
 						kind: mod.kind,
 						category: mod.category,
 						iconUrl: mod.iconUrl,
-						isOfficial: true,
+						installed: native.has(mod.id) || localFiles.some(f => f.filename === mod.filename),
+                        isOfficial: true,
 						meta: instance!.content[mod.filename] ?? instance!.content[`${mod.filename}.disabled`]
 					};
 				});
 
 				// 5. Adiciona quaisquer mods locais físicos que não estejam no catálogo oficial
 				const officialIds = new Set(OFFICIAL_HORIZON_MODS.map((m) => m.id));
+                const officialFiles = new Set(OFFICIAL_HORIZON_MODS.map(m => m.filename));
 				for (const f of localFiles) {
 					const cleanName = f.filename.replace(/\.disabled$/, '');
-					const stemId = cleanName.replace(/\.hmod|\.hnmod|\.jar$/g, '').split('-')[0];
-					if (!officialIds.has(stemId) && !officialIds.has(cleanName)) {
+					const stemId = cleanName.replace(/\.(hmod|hnmod|hshader|jar|zip)$/, '').replace(/-\d.*$/, '');
+					if (!officialIds.has(stemId) && !officialFiles.has(cleanName)) {
 						mappedRows.push({
 							id: stemId,
 							filename: f.filename,
@@ -177,7 +208,8 @@
 					}
 				}
 
-				rows = mappedRows;
+				// só o que está instalado/ativo entra na lista (como no Java); o resto vive no catálogo
+				rows = mappedRows.filter((r) => !r.isOfficial || r.enabled || r.installed);
 			} else {
 				// Instância Java Edition
 				if (isTauri) {
@@ -188,7 +220,7 @@
 					});
 
 					rows = files.map((f) => {
-						const meta = instance!.content[f.filename];
+						const meta = instance!.content[f.filename] ?? instance!.content[`${f.filename}.disabled`];
 						return {
 							id: f.filename,
 							filename: f.filename,
@@ -218,6 +250,7 @@
 						}));
 				}
 			}
+			baseline = Object.fromEntries(rows.map(r => [r.filename, r.enabled]));
 		} catch (e) {
 			toasts.err(e);
 		} finally {
@@ -228,7 +261,7 @@
 	$effect(() => {
 		if (!open || !instance) return;
 		void kind;
-		loadRows();
+		untrack(() => { void loadRows(); });
 	});
 
 	// Filtro combinado de busca, categoria e status
@@ -236,7 +269,6 @@
 		rows.filter((r) => {
 			if (statusFilter === 'enabled' && !r.enabled) return false;
 			if (statusFilter === 'disabled' && r.enabled) return false;
-			if (isHorizon && selectedCategory !== 'all' && r.category !== selectedCategory) return false;
 
 			if (!filter) return true;
 			const q = filter.toLowerCase().trim();
@@ -252,22 +284,37 @@
 	const enabledCount = $derived(rows.filter((r) => r.enabled).length);
 	const disabledCount = $derived(rows.length - enabledCount);
 
-	async function toggleMod(r: ModRow, enabled: boolean) {
+	function toggleMod(r: ModRow, enabled: boolean) {
+        if (saving || (instance && app.contentOperations[instance.id])) return;
+        addInlineOpen = false;
+        r.enabled = enabled;
+    }
+
+    async function persistMod(r: ModRow, enabled: boolean) {
 		if (!instance) return;
 		const prev = r.enabled;
 		r.enabled = enabled;
 
 		try {
 			if (isHorizon) {
-				// Grava em horizon-mods.txt no Horizon Rust
+				if (enabled) {
+                    const registry = await getHorizonRegistry();
+                    const project = registry.projects.find(p => p.id === r.id);
+                    if (project) await installHorizonMod(instance, project);
+                }
+                // Persist only after the download succeeds.
 				await setHorizonModState(instance.id, r.id, enabled);
+                if (isTauri && (r.kind === 'shader' || r.kind === 'resourcepack')) {
+                    await call('content_toggle', {ownerKind: 'instance', ownerId: instance.id, kind: r.kind, filename: r.filename, enabled});
+                }
 
 				// Atualiza o estado da instância
 				if (enabled) {
 					delete instance.content[`${r.filename}.disabled`];
 					instance.content[r.filename] = {
+                        ...instance.content[r.filename],
 						filename: r.filename,
-						kind: r.kind === 'shader' ? 'shader' : 'mod',
+						kind: r.kind === 'shader' ? 'shader' : r.kind === 'resourcepack' ? 'resourcepack' : 'mod',
 						title: r.name,
 						projectId: r.id,
 						versionId: r.version,
@@ -279,7 +326,7 @@
 					delete instance.content[r.filename];
 					instance.content[`${r.filename}.disabled`] = {
 						filename: `${r.filename}.disabled`,
-						kind: r.kind === 'shader' ? 'shader' : 'mod',
+						kind: r.kind === 'shader' ? 'shader' : r.kind === 'resourcepack' ? 'resourcepack' : 'mod',
 						title: r.name,
 						projectId: r.id,
 						versionId: r.version,
@@ -291,87 +338,30 @@
 				app.saveInstances();
 			} else {
 				// Java .jar toggle via renomeação
-				await call('content_toggle', {
+				if (isTauri) await call('content_toggle', {
 					ownerKind: 'instance',
 					ownerId: instance.id,
 					kind,
 					filename: r.filename,
 					enabled
 				});
-			}
-			onchanged?.();
-		} catch (e) {
-			r.enabled = prev;
-			toasts.err(e);
-		}
-	}
+                const clean = r.filename.replace(/\.disabled$/, '');
+                const meta = instance.content[clean] ?? instance.content[`${clean}.disabled`];
+                if (meta) {
+                    delete instance.content[clean]; delete instance.content[`${clean}.disabled`];
+                    const filename = enabled ? clean : `${clean}.disabled`;
+                    instance.content[filename] = {...meta, filename};
+                }
+            }
+            onchanged?.();
+        } catch (e) { r.enabled = prev; throw e; }
+    }
 
-	async function applyBulk(targetIds: Set<string> | 'all' | 'none' | 'defaults') {
-		if (!instance) return;
-		loadingRows = true;
-
-		try {
-			if (isHorizon) {
-				const bulkStates: Record<string, boolean> = {};
-
-				for (const r of rows) {
-					let shouldEnable = false;
-					if (targetIds === 'all') shouldEnable = true;
-					else if (targetIds === 'none') shouldEnable = false;
-					else if (targetIds === 'defaults') shouldEnable = DEFAULT_ENABLED_MOD_IDS.has(r.id);
-					else shouldEnable = targetIds.has(r.id);
-
-					r.enabled = shouldEnable;
-					bulkStates[r.id] = shouldEnable;
-
-					if (shouldEnable) {
-						delete instance.content[`${r.filename}.disabled`];
-						instance.content[r.filename] = {
-							filename: r.filename,
-							kind: r.kind === 'shader' ? 'shader' : 'mod',
-							title: r.name,
-							projectId: r.id,
-							size: r.size,
-							iconUrl: r.iconUrl
-						};
-					} else {
-						delete instance.content[r.filename];
-						instance.content[`${r.filename}.disabled`] = {
-							filename: `${r.filename}.disabled`,
-							kind: r.kind === 'shader' ? 'shader' : 'mod',
-							title: r.name,
-							projectId: r.id,
-							size: r.size,
-							iconUrl: r.iconUrl
-						};
-					}
-				}
-
-				await setHorizonModsBulk(instance.id, bulkStates);
-				app.saveInstances();
-				toasts.ok(
-					targetIds === 'defaults'
-						? 'Mods padrão recomendados do Horizon ativados!'
-						: targetIds === 'all'
-							? 'Todos os 77 mods do Horizon foram ativados!'
-							: 'Todos os mods foram desativados.'
-				);
-			} else {
-				for (const r of rows) {
-					const shouldEnable = targetIds === 'all';
-					if (r.enabled !== shouldEnable) {
-						await toggleMod(r, shouldEnable);
-					}
-				}
-				toasts.ok(targetIds === 'all' ? 'Todos os mods foram ativados!' : 'Todos os mods foram desativados.');
-			}
-			onchanged?.();
-		} catch (e) {
-			toasts.err(e);
-		} finally {
-			loadingRows = false;
-		}
-	}
+    function applyBulk(targetIds: Set<string> | 'all' | 'none' | 'defaults') {
+        if (saving || (instance && app.contentOperations[instance.id])) return;
+        addInlineOpen = false;
+        for (const r of rows) r.enabled = r.supported === false ? false : targetIds === 'all' ? true : targetIds === 'none' ? false : targetIds === 'defaults' ? DEFAULT_ENABLED_MOD_IDS.has(r.id) : targetIds.has(r.id);
+    }
 
 	async function openModsFolder() {
 		if (!instance) return;
@@ -401,7 +391,8 @@
 					filename: r.filename
 				});
 				delete instance.content[r.filename];
-				app.saveInstances();
+                delete instance.content[`${r.filename}.disabled`];
+				await app.saveInstances();
 				rows = rows.filter((x) => x !== r);
 				toasts.info(`Arquivo ${r.filename} excluído.`);
 			}
@@ -412,92 +403,50 @@
 	}
 </script>
 
-<Modal bind:open title="Gerenciador de Mods & Conteúdo" width={960}>
+<Modal bind:this={modsModal} bind:open {dirty} onsave={saveMods} dismissable={!saving} title={tr("Gerenciador de Mods & Conteúdo")} width={960}>
 	{#if instance}
 		<div class="flex flex-col gap-4">
 			<!-- Header Resumo da Instância -->
 			<div class="flex flex-wrap items-center justify-between gap-3 p-3.5 rounded-lg bg-[#0e1814] border border-[#1b2b22]">
-				<div class="flex items-center gap-3">
-					<div class="w-10 h-10 rounded-lg bg-[#14281e] flex items-center justify-center text-[#34d399] border border-[#234432]">
-						{#if isHorizon}
-							<Cpu size={24} />
-						{:else}
-							<Package size={24} />
-						{/if}
-					</div>
-					<div>
-						<h3 class="font-mc text-[14px] text-white flex items-center gap-2">
-							Mods de {instance.name}
-							{#if isHorizon}
-								<Badge tone="green" pixel>Horizon Rust 26.3</Badge>
-							{:else}
-								<Badge tone="blue">{LOADER_LABEL[instance.loader]} {instance.gameVersion}</Badge>
-							{/if}
+				<div class="flex min-w-0 flex-wrap items-center gap-3">
+					<BlockIcon icon={instance.icon} size={42} />
+					<div class="min-w-0 flex-1">
+						<h3 class="font-mc text-[14px] text-white flex flex-wrap items-center gap-2">
+							{tr("Mods de")} {instance.name}
+							<Badge tone={LOADER_TONE[instance.loader] ?? 'green'} pixel>{LOADER_LABEL[instance.loader] ?? instance.loader}</Badge>
+							<Badge tone="blue" pixel>{instance.gameVersion}</Badge>
 						</h3>
 						<p class="tp-muted text-[11.5px] mt-0.5">
-							{#if isHorizon}
-								Catálogo oficial do ecossistema Horizon (77 mods disponíveis) com sincronização em <code>horizon-mods.txt</code>.
-							{:else}
-								Gerenciador de mods Java (.jar), resourcepacks e shaders.
-							{/if}
+							{isHorizon ? 'Mods, texturas e shaders do motor Rust (Horizon 26.3) deste perfil.' : 'Gerenciador de mods (.jar), modpacks, texturas, shaders e data packs deste perfil.'}
 						</p>
 					</div>
 				</div>
 				<div class="flex items-center gap-2">
 					<PixelButton size="sm" variant="ghost" icon={FolderOpen} onclick={openModsFolder}>
-						Abrir pasta de mods
+						{tr("Abrir pasta de mods")}
 					</PixelButton>
 				</div>
 			</div>
-
-			<!-- Painel de Destaque Horizon Rust com Contadores e Ações em Massa -->
-			{#if isHorizon}
-				<div class="p-3.5 rounded-lg border border-[#10b981]/30 bg-[#0f241a]/70 flex flex-wrap items-center justify-between gap-3">
-					<div class="flex items-center gap-3">
-						<Sliders size={20} class="text-[#34d399]" />
-						<div>
-							<div class="text-[12.5px] text-white font-medium flex items-center gap-2">
-								Status: <b class="text-[#bef264]">{enabledCount} mods ativados</b> de {rows.length} disponíveis
-							</div>
-							<div class="text-[11px] text-[#9ca3af]">
-								Ative ou desative qualquer mod instantaneamente. O Horizon carrega as seleções automaticamente no boot.
-							</div>
-						</div>
-					</div>
-
-					<div class="flex flex-wrap items-center gap-2">
-						<PixelButton size="xs" variant="gold" icon={Sparkles} onclick={() => applyBulk('defaults')}>
-							Padrões Horizon
-						</PixelButton>
-						<PixelButton size="xs" variant="ghost" icon={CheckCheck} onclick={() => applyBulk('all')}>
-							Ativar todos
-						</PixelButton>
-						<PixelButton size="xs" variant="ghost" icon={XCircle} onclick={() => applyBulk('none')}>
-							Desativar todos
-						</PixelButton>
-					</div>
-				</div>
-			{/if}
 
 			<!-- Barra de Controles: Busca, Categorias e Filtros -->
 			<div class="flex flex-col gap-2.5">
 				<div class="flex flex-wrap items-center gap-2.5">
 					{#if !isHorizon}
-						<TabSelector tabs={contentTabs} bind:value={kind as string} size="sm" />
+						<TabSelector tabs={contentTabs.map(tab => ({...tab, disabled: tab.disabled || dirty || saving}))} bind:value={kind as string} size="sm" />
 					{/if}
 
 					<!-- Busca por texto -->
 					<div class="relative flex-1 min-w-[200px]">
 						<input
 							class="tp-input !h-9 w-full pr-8"
-							placeholder={isHorizon ? 'Buscar entre os 77 mods do Horizon (nome, ID, autor)...' : 'Filtrar por nome ou função...'}
+							placeholder="Filtrar por nome ou função..."
 							bind:value={filter}
 						/>
 						{#if filter}
 							<button
 								class="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#9ca3af] hover:text-white"
 								onclick={() => (filter = '')}
-								aria-label="Limpar busca"
+								aria-label={tr("Limpar busca")}
 							>
 								<X size={14} />
 							</button>
@@ -513,7 +462,7 @@
 							class:text-[#9ca3af]={statusFilter !== 'all'}
 							onclick={() => (statusFilter = 'all')}
 						>
-							Todos ({rows.length})
+							{tr("Todos")} ({rows.length})
 						</button>
 						<button
 							class="px-2.5 py-1 rounded transition-colors cursor-pointer"
@@ -522,7 +471,7 @@
 							class:text-[#9ca3af]={statusFilter !== 'enabled'}
 							onclick={() => (statusFilter = 'enabled')}
 						>
-							Ativados ({enabledCount})
+							{tr("Ativados")} ({enabledCount})
 						</button>
 						<button
 							class="px-2.5 py-1 rounded transition-colors cursor-pointer"
@@ -531,13 +480,13 @@
 							class:text-[#9ca3af]={statusFilter !== 'disabled'}
 							onclick={() => (statusFilter = 'disabled')}
 						>
-							Desativados ({disabledCount})
+							{tr("Desativados")} ({disabledCount})
 						</button>
 					</div>
 
 					<!-- Atualizar lista -->
-					<PixelButton size="sm" icon={RefreshCw} title="Recarregar lista" loading={loadingRows} onclick={loadRows}>
-						Atualizar
+					<PixelButton size="sm" icon={RefreshCw} title={tr("Recarregar lista")} loading={loadingRows} disabled={dirty || saving} onclick={loadRows}>
+						{tr("Atualizar")}
 					</PixelButton>
 
 					<!-- Adicionar Mod externo -->
@@ -545,42 +494,12 @@
 						size="sm"
 						variant={addInlineOpen ? 'ghost' : 'emerald'}
 						icon={addInlineOpen ? X : Plus}
-						onclick={() => (addInlineOpen = !addInlineOpen)}
+						disabled={dirty || saving} onclick={() => (addInlineOpen = !addInlineOpen)}
 					>
-						{addInlineOpen ? 'Fechar Catálogo' : isHorizon ? 'Adicionar Mod Externo' : 'Adicionar Mods (.jar)'}
+						{addInlineOpen ? tr("Fechar Catálogo") : tr("Explorar & Adicionar")}
 					</PixelButton>
 				</div>
 
-				<!-- Chips de Categorias para Horizon Rust -->
-				{#if isHorizon}
-					<div class="flex flex-wrap items-center gap-1.5 overflow-x-auto pb-1 text-[11px]">
-						{#each HORIZON_CATEGORIES as cat (cat.id)}
-							{@const countInCat = cat.id === 'all' ? rows.length : rows.filter((r) => r.category === cat.id).length}
-							<button
-								class="px-2.5 py-1 rounded-full border transition-all cursor-pointer font-medium flex items-center gap-1"
-								class:bg-[#153424]={selectedCategory === cat.id}
-								class:border-[#10b981]={selectedCategory === cat.id}
-								class:text-[#bef264]={selectedCategory === cat.id}
-								class:bg-[#0c1612]={selectedCategory !== cat.id}
-								class:border-[#1b2b22]={selectedCategory !== cat.id}
-								class:text-[#9ca3af]={selectedCategory !== cat.id}
-								class:hover:text-white={selectedCategory !== cat.id}
-								onclick={() => (selectedCategory = cat.id)}
-							>
-								{#if cat.id === 'hud'}<Sliders size={12} />
-								{:else if cat.id === 'qol'}<Sparkles size={12} />
-								{:else if cat.id === 'performance'}<Zap size={12} />
-								{:else if cat.id === 'map'}<Compass size={12} />
-								{:else if cat.id === 'multiplayer'}<Users size={12} />
-								{:else if cat.id === 'visual'}<Eye size={12} />
-								{:else if cat.id === 'shader'}<Layers size={12} />
-								{:else}<Package size={12} />
-								{/if}
-								{cat.label} ({countInCat})
-							</button>
-						{/each}
-					</div>
-				{/if}
 			</div>
 
 			<!-- Painel Inline de Catálogo / Adição Externa -->
@@ -588,8 +507,9 @@
 				<div class="p-4 rounded-lg bg-[#101b15] border-2 border-[#10b981] shadow-2xl">
 					<ContentPickerInline
 						bind:kind
-						allowedKinds={instance.loader === 'vanilla' ? ['resourcepack', 'shader'] : ['mod', 'shader', 'resourcepack', 'datapack']}
-						loaders={loadersFor(kind, instance.loader)}
+						allowedKinds={instance.loader === 'vanilla' ? ['resourcepack', 'shader', 'datapack'] : isHorizon ? ['mod', 'shader', 'resourcepack'] : ['mod', 'modpack', 'shader', 'resourcepack', 'datapack']}
+						loaders={isHorizon ? ['horizon-rust'] : loadersFor(kind, instance.loader)}
+						horizon={isHorizon}
 						gameVersion={instance.gameVersion}
 						mode="install"
 						target={{ ownerKind: 'instance', owner: instance }}
@@ -604,11 +524,10 @@
 
 			<!-- Lista de Mods (Horizon 77 mods ou Java Mods) -->
 			{#if visibleRows.length}
-				<div class="tp-slot divide-y divide-[#1d2a23] max-h-[480px] overflow-y-auto pr-1">
+				<div class="tp-slot divide-y divide-[#1d2a23]">
 					{#each visibleRows as r (r.id + r.filename)}
 						<div
 							class="flex items-center gap-3.5 p-3 transition-colors hover:bg-[#122219]/60"
-							class:opacity-50={!r.enabled}
 						>
 							<!-- Ícone do Mod -->
 							{#if r.iconUrl}
@@ -631,13 +550,15 @@
 
 							<!-- Detalhes do Mod -->
 							<div class="min-w-0 flex-1">
-								<div class="truncate text-[13px] font-semibold flex items-center gap-2 flex-wrap">
+								<div class="text-[13px] font-semibold flex items-center gap-2 flex-wrap break-words">
 									<span class="text-white font-mc tracking-wide">{r.name}</span>
 
-									{#if r.enabled}
-										<Badge tone="green" pixel>Ativado</Badge>
+									{#if r.supported === false}
+                                        <Badge tone="gold">{tr('Requer compilação nativa')}</Badge>
+                                    {:else if r.enabled}
+										<Badge tone="green" pixel>{r.installed === false ? tr("Selecionado · baixar ao salvar") : tr("Ativado")}</Badge>
 									{:else}
-										<Badge tone="muted">Desativado</Badge>
+										<Badge tone="muted">{tr("Desativado")}</Badge>
 									{/if}
 
 									{#if r.kind === 'native-mod'}
@@ -649,7 +570,7 @@
 									{/if}
 
 									{#if isHorizon && DEFAULT_ENABLED_MOD_IDS.has(r.id)}
-										<Badge tone="gold">Padrão</Badge>
+										<Badge tone="gold">{tr("Padrão")}</Badge>
 									{/if}
 								</div>
 
@@ -657,7 +578,7 @@
 									<p class="text-[11.5px] text-[#cbd5e1] mt-0.5 line-clamp-1">{r.summary}</p>
 								{/if}
 
-								<div class="tp-muted truncate font-mono text-[11px] mt-0.5 flex items-center gap-2">
+								<div class="tp-muted font-mono text-[11px] mt-0.5 flex flex-wrap items-center gap-2 break-all">
 									<span>id: <code>{r.id}</code></span>
 									{#if r.version}
 										<span>· v{r.version}</span>
@@ -673,9 +594,9 @@
 
 							<!-- Ações: Toggle Switch e Excluir/Desativar -->
 							<div class="flex items-center gap-3 shrink-0">
-								<Toggle checked={r.enabled} onchange={(v) => toggleMod(r, v)} />
+								<Toggle checked={r.enabled} ariaLabel={r.name} disabled={saving || loadingRows || !!app.contentOperations[instance.id] || r.supported === false} onchange={(v) => toggleMod(r, v)} />
 								{#if !r.isOfficial}
-									<PixelButton size="sm" variant="ghost" icon={Trash2} title="Excluir arquivo customizado" onclick={() => removeMod(r)} />
+									<PixelButton size="sm" variant="ghost" icon={Trash2} title={tr("Excluir arquivo customizado")} onclick={() => removeMod(r)} />
 								{/if}
 							</div>
 						</div>
@@ -684,28 +605,27 @@
 
 				<p class="tp-help !mt-1">
 					{#if isHorizon}
-						Os mods são ativados e persistidos em tempo real no arquivo <code>horizon-mods.txt</code> da instância e lidos nativamente pelo motor Rust.
+						{tr("Salve para aplicar os mods selecionados ao Minecraft Rust. O launcher baixa os arquivos necessários e mantém os módulos integrados selecionados.")}
 					{:else}
-						Desativar um mod renomeia o arquivo para <code>.disabled</code>, preservando suas configurações com segurança.
+						{tr("Desativar um mod mantém o arquivo e suas configurações para ativá-lo novamente depois.")}
 					{/if}
 				</p>
 			{:else}
 				<div class="py-12 text-center">
 					<p class="tp-muted text-[13.5px]">
-						{loadingRows ? 'Carregando mods do ecossistema...' : 'Nenhum mod encontrado com o filtro atual.'}
+						{loadingRows ? tr("Carregando mods...") : rows.length === 0 && !filter && statusFilter === 'all' ? tr("Nenhum mod instalado ainda. Use Explorar & Adicionar.") : tr("Nenhum mod encontrado com o filtro atual.")}
 					</p>
-					{#if filter || selectedCategory !== 'all' || statusFilter !== 'all'}
+					{#if filter || statusFilter !== 'all'}
 						<div class="mt-3">
 							<PixelButton
 								size="sm"
 								variant="ghost"
 								onclick={() => {
 									filter = '';
-									selectedCategory = 'all';
 									statusFilter = 'all';
 								}}
 							>
-								Limpar todos os filtros
+								{tr("Limpar todos os filtros")}
 							</PixelButton>
 						</div>
 					{/if}
@@ -715,6 +635,7 @@
 	{/if}
 
 	{#snippet footer()}
-		<PixelButton variant="ghost" onclick={() => (open = false)}>Fechar</PixelButton>
+		<PixelButton variant="ghost" onclick={() => modsModal?.close()}>{tr("Fechar")}</PixelButton>
+        <PixelButton variant="emerald" loading={saving} onclick={() => saveMods().catch(() => {})}>{tr("Salvar Alterações")}</PixelButton>
 	{/snippet}
 </Modal>

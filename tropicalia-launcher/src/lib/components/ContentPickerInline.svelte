@@ -1,22 +1,30 @@
 <!-- Componente reutilizável para buscar, listar e selecionar/instalar Mods, Plugins, Texturas e Shaders na mesma tela, sem trocar de página. -->
 <script lang="ts">
+    import { tr } from '$lib/ui-text';
 	import PixelButton from './PixelButton.svelte';
 	import Badge from './Badge.svelte';
 	import TabSelector from './TabSelector.svelte';
-	import { toasts } from '$lib/state.svelte';
+	import { app, toasts } from '$lib/state.svelte';
 	import { call, isTauri } from '$lib/platform';
 	import {
 		CATEGORIES,
+		applyInstallPlan,
 		loadersFor,
+		pickBest,
 		planInstall,
+		primaryFile,
+		projectVersions,
 		search,
-		toInstalled,
 		type SearchHit
 	} from '$lib/services/modrinth';
 	import {
-		getHorizonRegistry,
+				getHorizonRegistry,
 		searchHorizonMods,
-		installHorizonMod
+		installHorizonMod,
+		supportedHorizonNativeMods,
+		HORIZON_CATEGORIES,
+		OFFICIAL_HORIZON_MODS,
+		type HorizonModProject
 	} from '$lib/services/horizon-mods';
 	import type { ContentKind, InstalledContent, ModLoader } from '$lib/types';
 	import { errorMessage, formatCount } from '$lib/util/format';
@@ -40,7 +48,7 @@
 	const KIND_LABELS: Record<ContentKind, { label: string; icon: any }> = {
 		mod: { label: 'Mods', icon: Puzzle },
 		plugin: { label: 'Plugins', icon: Package },
-		resourcepack: { label: 'Texturas', icon: Image },
+		resourcepack: { label: tr("Texturas"), icon: Image },
 		shader: { label: 'Shaders', icon: Sun },
 		datapack: { label: 'Data packs', icon: Box },
 		modpack: { label: 'Modpacks', icon: Layers }
@@ -55,8 +63,9 @@
 		selected = $bindable<SearchHit[]>([]),
 		target = undefined,
 		oninstalled = undefined,
-		title = '',
-		compact = false
+				title = '',
+		compact = false,
+		horizon = false
 	}: {
 		kind?: ContentKind;
 		allowedKinds?: ContentKind[];
@@ -67,9 +76,13 @@
 		target?: { ownerKind: 'instance' | 'server'; owner: { id: string; name: string; content: Record<string, InstalledContent> } };
 		oninstalled?: (hit: SearchHit) => void;
 		title?: string;
-		compact?: boolean;
+				compact?: boolean;
+		/** Perfil Rust (Horizon): o catálogo vem do registro oficial, com a mesma UI do Modrinth. */
+		horizon?: boolean;
 	} = $props();
 
+	let source = $state<'modrinth' | 'curseforge'>('modrinth');
+	$effect(() => { if (kind !== 'mod') source = 'modrinth'; });
 	let query = $state('');
 	let selectedCategory = $state<string>('');
 	let hits = $state<SearchHit[]>([]);
@@ -85,7 +98,41 @@
 		return ['fabric', 'forge', 'neoforge'];
 	});
 
-	const categories = $derived(CATEGORIES[kind] ?? []);
+		const isHz = $derived(horizon || loaders.includes('horizon-rust'));
+	const categories = $derived(
+		isHz
+			? kind === 'mod'
+				? HORIZON_CATEGORIES.filter((c) => c.id !== 'all' && c.id !== 'shader').map((c) => ({ id: c.id, label: tr(c.label) }))
+				: []
+			: source === 'curseforge'
+				? []
+				: CATEGORIES[kind] ?? []
+	);
+
+	const PAGE = 20;
+	let total = $state(0);
+	let loadingMore = $state(false);
+	let sentinel = $state<HTMLElement | null>(null);
+	let hzAll: SearchHit[] = [];
+	const hzProjects = new Map<string, HorizonModProject>();
+	const hzCategory = new Map(OFFICIAL_HORIZON_MODS.map((m) => [m.id, m.category]));
+	let nativeIds = $state(new Set<string>());
+	const hasMore = $derived(hits.length < total);
+
+	$effect(() => {
+		if (!isHz) return;
+		supportedHorizonNativeMods({ id: target?.owner?.id ?? 'new-instance' })
+			.then((ids) => (nativeIds = ids))
+			.catch(() => {});
+	});
+
+	/** .hnmod só roda num motor compilado com o mod (Android embute alguns). */
+	function unavailable(hit: SearchHit): boolean {
+		if (!isHz) return false;
+		const f = hzProjects.get(hit.project_id)?.versions?.[0]?.file?.name ?? '';
+		return f.endsWith('.hnmod') && !nativeIds.has(hit.project_id);
+	}
+
 
 	let searchSeq = 0;
 	let debounceTimer: ReturnType<typeof setTimeout>;
@@ -95,12 +142,16 @@
 		loading = true;
 		error = '';
 
-		const isHorizonMods = effectiveLoaders.includes('horizon-rust') && kind === 'mod';
-		if (isHorizonMods) {
+		if (isHz) {
 			try {
-				const horizonMods = await searchHorizonMods(query.trim());
+				const wanted = kind === 'shader' ? ['shader'] : kind === 'resourcepack' ? ['resourcepack'] : ['mod', 'native-mod'];
+				const list = (await searchHorizonMods(query.trim())).filter(
+					(m) => wanted.includes(m.kind) && (!selectedCategory || hzCategory.get(m.id) === selectedCategory)
+				);
 				if (currentSeq !== searchSeq) return;
-				hits = horizonMods.map((m) => ({
+				hzProjects.clear();
+				for (const m of list) hzProjects.set(m.id, m);
+				hzAll = list.map((m) => ({
 					project_id: m.id,
 					slug: m.id,
 					title: m.name,
@@ -117,6 +168,8 @@
 					server_side: 'optional',
 					date_modified: m.versions[0]?.published ?? ''
 				}));
+				total = hzAll.length;
+				hits = hzAll.slice(0, PAGE);
 			} catch (e) {
 				if (currentSeq === searchSeq) error = errorMessage(e);
 			} finally {
@@ -127,6 +180,7 @@
 
 		try {
 			const res = await search({
+				source: kind === 'mod' ? source : 'modrinth',
 				query: query.trim(),
 				kind,
 				loaders: effectiveLoaders,
@@ -136,8 +190,9 @@
 				offset: 0,
 				limit: compact ? 12 : 20
 			});
-			if (currentSeq !== searchSeq) return;
+						if (currentSeq !== searchSeq) return;
 			hits = res.hits;
+			total = res.total_hits ?? res.hits.length;
 		} catch (e) {
 			if (currentSeq === searchSeq) error = errorMessage(e);
 		} finally {
@@ -145,8 +200,56 @@
 		}
 	}
 
+		async function loadMore() {
+		if (loading || loadingMore || !hasMore) return;
+		if (isHz) {
+			hits = hzAll.slice(0, hits.length + PAGE);
+			return;
+		}
+		const seq = searchSeq;
+		loadingMore = true;
+		try {
+			const res = await search({
+				source: kind === 'mod' ? source : 'modrinth',
+				query: query.trim(),
+				kind,
+				loaders: effectiveLoaders,
+				gameVersion: gameVersion.trim() || undefined,
+				categories: selectedCategory ? [selectedCategory] : [],
+				index: 'downloads',
+				offset: hits.length,
+				limit: compact ? 12 : 20
+			});
+			if (seq !== searchSeq) return;
+			const seen = new Set(hits.map((h) => h.project_id));
+			const fresh = res.hits.filter((h) => !seen.has(h.project_id));
+			hits = [...hits, ...fresh];
+			// página sem novidades: fim real da lista (evita laço infinito)
+			total = fresh.length ? (res.total_hits ?? total) : hits.length;
+		} catch (e) {
+			if (seq === searchSeq) error = errorMessage(e);
+		} finally {
+			loadingMore = false;
+		}
+	}
+
+	// Rolagem infinita: quando o fim da lista aparece, carrega a próxima página.
+	$effect(() => {
+		const el = sentinel;
+		if (!el || typeof IntersectionObserver === 'undefined') return;
+		const io = new IntersectionObserver(
+			(entries) => {
+				if (entries.some((e) => e.isIntersecting)) void loadMore();
+			},
+			{ rootMargin: '300px 0px' }
+		);
+		io.observe(el);
+		return () => io.disconnect();
+	});
+
 	$effect(() => {
 		void kind;
+		void source;
 		void query;
 		void selectedCategory;
 		void effectiveLoaders.join(',');
@@ -171,17 +274,30 @@
 	}
 
 	function isAlreadyInstalled(hit: SearchHit): boolean {
-		if (!target?.owner?.content) return false;
+				if (!target?.owner?.content) return false;
+		if (isHz) {
+			const f = hzProjects.get(hit.project_id)?.versions?.[0]?.file?.name;
+			return !!f && !!target.owner.content[f];
+		}
 		return Object.values(target.owner.content).some(
-			(c) => c.projectId === hit.project_id || c.title.toLowerCase() === hit.title.toLowerCase()
+			(c) => !c.filename.endsWith('.disabled') && !!c.url && (c.projectId === hit.project_id || c.title.toLowerCase() === hit.title.toLowerCase())
 		);
 	}
 
 	async function directInstall(hit: SearchHit) {
+        if (!target || installingId) return;
+        const owner = target.owner;
+        try {
+            await app.installContent(owner.id, () => directInstallCore(hit));
+            await app.saveInstances();
+            await app.saveServers();
+        } catch (e) { toasts.err(e); }
+    }
+
+    async function directInstallCore(hit: SearchHit) {
 		if (!target) return;
 
-		const isHorizonMods = effectiveLoaders.includes('horizon-rust') && kind === 'mod';
-		if (isHorizonMods) {
+				if (isHz) {
 			installingId = hit.project_id;
 			try {
 				const registry = await getHorizonRegistry();
@@ -198,32 +314,39 @@
 			return;
 		}
 
+		if (kind === 'modpack' && target.ownerKind === 'instance') {
+			installingId = hit.project_id;
+			try {
+				let versions = await projectVersions(hit.project_id, effectiveLoaders, gameVersion.trim() || undefined);
+				// Keep the selected Minecraft version and loader constraints.
+				const v = pickBest(versions);
+				if (!v) throw new Error(`Nenhuma versão encontrada para o modpack "${hit.title}".`);
+				if (isTauri) {
+					await call('mrpack_install', {
+						instanceId: target.owner.id,
+						source: primaryFile(v).url
+					});
+				}
+				(target.owner as any).modpack = { projectId: hit.project_id, versionId: v.id, name: hit.title };
+				toasts.ok(`Modpack ${hit.title} instalado em ${target.owner.name}!`);
+				oninstalled?.(hit);
+			} catch (e) {
+				toasts.err(e);
+			} finally {
+				installingId = null;
+			}
+			return;
+		}
+
 		installingId = hit.project_id;
 		try {
-			const installed = new Set(Object.values(target.owner.content).map((x) => x.projectId).filter(Boolean) as string[]);
+			const installed = new Set(Object.values(target.owner.content).filter(x => !x.filename.endsWith('.disabled')).map((x) => x.projectId).filter(Boolean) as string[]);
 			const { plan } = await planInstall(
 				{ id: hit.project_id, title: hit.title, iconUrl: hit.icon_url },
 				{ kind, loaders: effectiveLoaders, gameVersion: gameVersion.trim(), installed }
 			);
 
-			if (isTauri) {
-				await call('content_install', {
-					ownerKind: target.ownerKind,
-					ownerId: target.owner.id,
-					kind,
-					files: plan.map((item) => ({
-						url: item.file.url,
-						filename: item.file.filename,
-						sha1: item.file.hashes.sha1,
-						size: item.file.size
-					}))
-				});
-			}
-
-			for (const item of plan) {
-				const installedItem = toInstalled(item, kind);
-				target.owner.content[installedItem.filename] = installedItem;
-			}
+			await applyInstallPlan(plan, kind, { ...target, loaders: effectiveLoaders, gameVersion: gameVersion.trim() });
 
 			toasts.ok(`${hit.title} instalado com sucesso em ${target.owner.name}!`);
 			oninstalled?.(hit);
@@ -240,6 +363,9 @@
 </script>
 
 <div class="content-picker" class:compact>
+    {#if kind === 'mod' && !isHz}
+        <TabSelector tabs={[{ id: 'modrinth', label: 'Modrinth' }, { id: 'curseforge', label: 'CurseForge' }]} bind:value={source} size="sm" />
+    {/if}
 	{#if title || allowedTabs.length > 1}
 		<div class="picker-header">
 			{#if title}
@@ -261,12 +387,12 @@
 			<input
 				class="tp-input search-input"
 				bind:value={query}
-				placeholder={effectiveLoaders.includes('horizon-rust') && kind === 'mod'
-					? 'Buscar mods oficiais Horizon Rust (.hnmod / .hmod)...'
+				placeholder={isHz
+					? `Buscar ${KIND_LABELS[kind]?.label.toLowerCase()} do Horizon Rust...`
 					: `Buscar ${KIND_LABELS[kind]?.label.toLowerCase()} (ex: Sodium, Iris, Create, LuckPerms)...`}
 			/>
 			{#if query}
-				<button class="clear-btn" onclick={() => (query = '')} aria-label="Limpar busca">
+				<button class="clear-btn" onclick={() => (query = '')} aria-label={tr("Limpar busca")}>
 					<X size={14} />
 				</button>
 			{/if}
@@ -283,7 +409,7 @@
 				class:active={selectedCategory === ''}
 				onclick={() => (selectedCategory = '')}
 			>
-				Todos
+				{tr("Todos")}
 			</button>
 			{#each categories as cat (cat.id)}
 				<button
@@ -351,7 +477,7 @@
 			<div class="cards-grid">
 				{#each hits as hit (hit.project_id)}
 					{@const sel = isSelected(hit)}
-					{@const installed = isAlreadyInstalled(hit)}
+					{@const installed = isAlreadyInstalled(hit) && !unavailable(hit)}
 					{@const busy = installingId === hit.project_id}
 					<div class="item-card" class:selected={sel} class:installed>
 						<div class="card-left">
@@ -367,7 +493,9 @@
 						<div class="card-content">
 							<div class="flex items-center gap-1.5 flex-wrap">
 								<h4 class="item-title truncate" title={hit.title}>{hit.title}</h4>
-								{#if installed}
+																{#if unavailable(hit)}
+									<span title="Este mod é código Rust que precisa ser compilado dentro do motor, e ainda não está incluído no motor do Tropicalia."><Badge tone="gold" pixel>Não incluído no motor</Badge></span>
+								{:else if installed}
 									<Badge tone="green" pixel>Instalado</Badge>
 								{:else if sel}
 									<Badge tone="gold" pixel>Selecionado</Badge>
@@ -382,6 +510,7 @@
 								<button
 									class="select-btn"
 									class:on={sel}
+										disabled={unavailable(hit)}
 									onclick={() => toggleSelect(hit)}
 									aria-pressed={sel}
 								>
@@ -394,9 +523,11 @@
 									{/if}
 								</button>
 							{:else}
-								{#if installed}
-									<Badge tone="green">Pronto</Badge>
-								{:else}
+																	{#if installed}
+										<Badge tone="green">Pronto</Badge>
+									{:else if unavailable(hit)}
+										<Badge tone="gold">Indisponível</Badge>
+									{:else}
 									<PixelButton
 										size="sm"
 										variant="emerald"
@@ -410,11 +541,20 @@
 							{/if}
 						</div>
 					</div>
-				{/each}
-			</div>
-		{/if}
+									{/each}
+				</div>
+				{#if hasMore}
+					<div bind:this={sentinel} class="more-row" aria-live="polite">
+						<div class="spinner small"></div>
+						<span class="tp-muted text-[11.5px]">Carregando mais…</span>
+					</div>
+				{:else if hits.length > PAGE}
+					<p class="more-row tp-muted text-[11.5px]">Fim da lista · {hits.length} itens</p>
+				{/if}
+			{/if}
+		</div>
 	</div>
-</div>
+
 
 <style>
 	.content-picker {
@@ -422,6 +562,28 @@
 		flex-direction: column;
 		gap: 12px;
 		width: 100%;
+		min-width: 0;
+		max-width: 100%;
+		box-sizing: border-box;
+	}
+		.more-row {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 8px;
+		padding: 14px 0 4px;
+	}
+	.spinner.small {
+		width: 14px;
+		height: 14px;
+	}
+	.select-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+	.content-picker > * {
+		min-width: 0;
+		max-width: 100%;
 	}
 
 	.picker-header {
@@ -556,6 +718,8 @@
 	}
 
 	.results-container {
+		min-width: 0;
+		overflow-x: hidden;
 		min-height: 160px;
 		max-height: 380px;
 		overflow-y: auto;
@@ -567,13 +731,13 @@
 
 	.cards-grid {
 		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+		grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
 		gap: 8px;
 	}
 
 	.item-card {
 		display: grid;
-		grid-template-columns: 44px 1fr auto;
+		grid-template-columns: 44px minmax(0, 1fr) auto;
 		align-items: center;
 		gap: 10px;
 		padding: 8px 10px;
@@ -691,10 +855,11 @@
 
 	@media (max-width: 640px) {
 		.cards-grid {
-			grid-template-columns: 1fr;
+			grid-template-columns: minmax(0, 1fr);
 		}
 		.item-card {
-			grid-template-columns: 36px 1fr auto;
+			min-width: 0;
+			grid-template-columns: 36px minmax(0, 1fr) auto;
 			gap: 8px;
 			padding: 6px 8px;
 		}

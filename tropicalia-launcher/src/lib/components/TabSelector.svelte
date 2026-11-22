@@ -41,7 +41,9 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 7px;
-		height: 34px;
+		min-height: 34px;
+        max-width: 100%;
+        overflow-wrap: anywhere;
 		padding: 0 12px;
 		border: 0;
 		cursor: pointer;
@@ -60,7 +62,7 @@
 		transition: filter 0.08s, color 0.08s;
 	}
 	.sm button {
-		height: 28px;
+		min-height: 32px;
 		padding: 0 9px;
 		font-size: 10px;
 	}

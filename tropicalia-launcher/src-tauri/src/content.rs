@@ -26,6 +26,8 @@ fn extract_horizon_mod_id(filename: &str) -> String {
         .strip_suffix(".hmod")
         .or_else(|| clean.strip_suffix(".hnmod"))
         .or_else(|| clean.strip_suffix(".jar"))
+        .or_else(|| clean.strip_suffix(".hshader"))
+        .or_else(|| clean.strip_suffix(".zip"))
         .unwrap_or(clean);
     if let Some((id, ver)) = stem.split_once('-') {
         if ver.chars().next().map_or(false, |c| c.is_ascii_digit()) {
@@ -35,7 +37,8 @@ fn extract_horizon_mod_id(filename: &str) -> String {
     stem.to_string()
 }
 
-fn update_horizon_mods_txt(base_dir: &Path, mod_id: &str, enabled: bool) {
+fn update_horizon_mods_txt(base_dir: &Path, mod_id: &str, enabled: bool) -> Result<(), String> {
+    paths::safe_name(mod_id)?;
     let path = base_dir.join("horizon-mods.txt");
     let mut lines: Vec<String> = if path.exists() {
         std::fs::read_to_string(&path)
@@ -63,7 +66,7 @@ fn update_horizon_mods_txt(base_dir: &Path, mod_id: &str, enabled: bool) {
         lines.push(new_line);
     }
 
-    let _ = std::fs::write(&path, lines.join("\n") + "\n");
+    std::fs::write(&path, lines.join("\n") + "\n").map_err(|e| e.to_string())
 }
 
 fn remove_from_horizon_mods_txt(base_dir: &Path, mod_id: &str) {
@@ -107,16 +110,12 @@ fn base_dir(app: &AppHandle, owner_kind: &str, owner_id: &str) -> Result<PathBuf
 
 fn resolve_content_dir(app: &AppHandle, owner_kind: &str, owner_id: &str, kind: &str) -> Result<PathBuf, String> {
     let base = base_dir(app, owner_kind, owner_id)?;
-    if kind == "mod" || kind == "mods" {
-        let horizon_mods = base.join("horizon-mods");
-        let java_mods = base.join("mods");
-        if horizon_mods.exists() && !java_mods.exists() {
-            return Ok(horizon_mods);
-        }
+    if owner_kind == "instance" && (kind == "mod" || kind == "mods") {
+        crate::game::migrate_java_mods(&base)?;
     }
     let sub = paths::content_folder(kind)?;
     let p = base.join(sub);
-    let _ = std::fs::create_dir_all(&p);
+    std::fs::create_dir_all(&p).map_err(|e| e.to_string())?;
     Ok(p)
 }
 
@@ -167,12 +166,12 @@ pub fn content_toggle(app: AppHandle, owner_kind: String, owner_id: String, kind
     let (from, to) = if enabled { (off, on) } else { (on, off) };
 
     if from.exists() {
-        let _ = std::fs::rename(from, to);
+        std::fs::rename(from, to).map_err(|e| e.to_string())?;
     }
 
     if dir.ends_with("horizon-mods") || base.join("horizon-mods.txt").exists() || name.ends_with(".hmod") || name.ends_with(".hnmod") {
         let mod_id = extract_horizon_mod_id(&name);
-        update_horizon_mods_txt(&base, &mod_id, enabled);
+        update_horizon_mods_txt(&base, &mod_id, enabled)?;
     }
 
     Ok(())
@@ -199,6 +198,42 @@ pub fn content_delete(app: AppHandle, owner_kind: String, owner_id: String, kind
     Ok(())
 }
 
+/// Mods nativos (.hnmod) compilados no motor Horizon que o Tropicalia distribui (Android e desktop):
+/// aplicados com horizon-mixins antes de compilar o motor. Todos começam desligados; o launcher liga
+/// os que o jogador instala (`mod.<id>:true` no horizon-mods.txt).
+pub const BUILT_IN_NATIVE_MODS: [&str; 33] = ["appleskin", "appleskin_horizon", "armor_status", "blockscope", "chatheads", "classic_zoom", "coords_hud", "crosshair_indicator", "crossversion", "eatinganimation", "fly_speed", "fps_overlay", "fullbright", "fullbright_horizon", "hitbox_plus", "inventory_profiles", "inventory_wizard", "jei", "keystrokes", "killc", "light_overlay", "minimap", "motion_blur", "recipes", "rightharvest", "rmotd", "serverify", "smartf3", "status_effect_hud", "stuck", "toggle_sprint", "xtoxray", "zoom"];
+
+#[tauri::command]
+pub fn horizon_native_mods(app: AppHandle, instance_id: String, binary_path: Option<String>) -> Result<Vec<String>, String> {
+    #[cfg(target_os = "android")]
+    { let _ = (app, instance_id, binary_path); return Ok(BUILT_IN_NATIVE_MODS.map(str::to_owned).to_vec()); }
+    #[cfg(not(target_os = "android"))]
+    {
+        // O motor que vem com o launcher já traz estes; um binário próprio declara os seus no native-mods.json.
+        let bundled_engine = binary_path.as_deref().is_none_or(str::is_empty);
+        let mut manifests = vec![paths::instance(&app, &instance_id)?.join("native-mods.json")];
+        if let Some(binary) = binary_path.filter(|p| !p.is_empty()) {
+            if let Some(parent) = Path::new(&binary).parent() { manifests.push(parent.join("native-mods.json")); }
+        } else {
+            manifests.push(paths::root(&app)?.join("runtimes/horizon/native-mods.json"));
+        }
+        let mut ids = Vec::new();
+        for manifest in manifests {
+            if let Ok(raw) = std::fs::read_to_string(manifest) {
+                if let Ok(info) = serde_json::from_str::<Value>(&raw) {
+                    if let Some(mods) = info["mods"].as_array() {
+                        ids.extend(mods.iter().filter_map(|m| m["id"].as_str().map(str::to_owned)));
+                    }
+                }
+            }
+        }
+        if bundled_engine {
+            ids.extend(BUILT_IN_NATIVE_MODS.map(str::to_owned));
+        }
+        ids.sort(); ids.dedup(); Ok(ids)
+    }
+}
+
 #[tauri::command]
 pub fn horizon_mods_state_get(app: AppHandle, instance_id: String) -> Result<std::collections::HashMap<String, bool>, String> {
     let base = paths::instance(&app, &instance_id)?;
@@ -208,7 +243,7 @@ pub fn horizon_mods_state_get(app: AppHandle, instance_id: String) -> Result<std
 #[tauri::command]
 pub fn horizon_mods_state_set(app: AppHandle, instance_id: String, mod_id: String, enabled: bool) -> Result<(), String> {
     let base = paths::instance(&app, &instance_id)?;
-    update_horizon_mods_txt(&base, &mod_id, enabled);
+    update_horizon_mods_txt(&base, &mod_id, enabled)?;
 
     let dir = base.join("horizon-mods");
     if dir.exists() {
@@ -219,10 +254,10 @@ pub fn horizon_mods_state_set(app: AppHandle, instance_id: String, mod_id: Strin
                     let is_disabled = name.ends_with(".disabled");
                     if enabled && is_disabled {
                         let clean = name.strip_suffix(".disabled").unwrap_or(&name);
-                        let _ = std::fs::rename(entry.path(), dir.join(clean));
+                        std::fs::rename(entry.path(), dir.join(clean)).map_err(|e| e.to_string())?;
                     } else if !enabled && !is_disabled {
                         let off = format!("{name}.disabled");
-                        let _ = std::fs::rename(entry.path(), dir.join(off));
+                        std::fs::rename(entry.path(), dir.join(off)).map_err(|e| e.to_string())?;
                     }
                 }
             }
@@ -235,7 +270,7 @@ pub fn horizon_mods_state_set(app: AppHandle, instance_id: String, mod_id: Strin
 pub fn horizon_mods_state_set_bulk(app: AppHandle, instance_id: String, states: std::collections::HashMap<String, bool>) -> Result<(), String> {
     let base = paths::instance(&app, &instance_id)?;
     for (id, enabled) in &states {
-        update_horizon_mods_txt(&base, id, *enabled);
+        update_horizon_mods_txt(&base, id, *enabled)?;
     }
     let dir = base.join("horizon-mods");
     if dir.exists() {
@@ -247,10 +282,10 @@ pub fn horizon_mods_state_set_bulk(app: AppHandle, instance_id: String, states: 
                     let is_disabled = name.ends_with(".disabled");
                     if enabled && is_disabled {
                         let clean = name.strip_suffix(".disabled").unwrap_or(&name);
-                        let _ = std::fs::rename(entry.path(), dir.join(clean));
+                        std::fs::rename(entry.path(), dir.join(clean)).map_err(|e| e.to_string())?;
                     } else if !enabled && !is_disabled {
                         let off = format!("{name}.disabled");
-                        let _ = std::fs::rename(entry.path(), dir.join(off));
+                        std::fs::rename(entry.path(), dir.join(off)).map_err(|e| e.to_string())?;
                     }
                 }
             }
@@ -293,12 +328,17 @@ pub async fn content_install(
             size: f.size,
         });
 
-        if is_horizon || f.filename.ends_with(".hmod") || f.filename.ends_with(".hnmod") {
-            let mod_id = extract_horizon_mod_id(&f.filename);
-            update_horizon_mods_txt(&base, &mod_id, true);
+    }
+    let result = download::fetch_all(&app, &state.http, &owner_id, "content", jobs, 6).await;
+    if result.is_ok() {
+        for f in &files {
+            if is_horizon || f.filename.ends_with(".hmod") || f.filename.ends_with(".hnmod") {
+                update_horizon_mods_txt(&base, &extract_horizon_mod_id(&f.filename), true)?;
+            }
         }
     }
-    download::fetch_all(&app, &state.http, &owner_id, "content", jobs, 6).await
+    download::emit(&app, &owner_id, "content-finished", 1, 1, "");
+    result
 }
 
 #[tauri::command]
@@ -343,10 +383,141 @@ pub fn path_of(app: AppHandle, what: String, id: Option<String>, sub: Option<Str
     if let Some(s) = sub {
         if !s.is_empty() {
             p = p.join(s);
-            let _ = std::fs::create_dir_all(&p);
+            std::fs::create_dir_all(&p).map_err(|e| e.to_string())?;
         }
     }
     Ok(p.to_string_lossy().to_string())
+}
+
+// ---------------------------------------------------------------- skins
+
+const PNG_MAGIC: &[u8] = &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+
+fn check_png(png: &[u8]) -> Result<(), String> {
+    if png.len() > 8_000_000 || !png.starts_with(PNG_MAGIC) {
+        return Err("Imagem PNG inválida.".into());
+    }
+    Ok(())
+}
+
+/// Pasta pública onde o usuário encontra o arquivo: `Imagens/TropicaliaCraft` para fotos e
+/// `Downloads/TropicaliaCraft` para skins. No Android 11+ o app grava ali direto (o sistema
+/// indexa na galeria sem permissão extra).
+fn public_dir(app: &AppHandle, kind: &str) -> Option<PathBuf> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = app;
+        let base = std::env::var("EXTERNAL_STORAGE").unwrap_or_else(|_| "/storage/emulated/0".into());
+        let sub = if kind == "photo" { "Pictures" } else { "Download" };
+        Some(PathBuf::from(base).join(sub).join("TropicaliaCraft"))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        use tauri::Manager;
+        let base = if kind == "photo" { app.path().picture_dir() } else { app.path().download_dir() };
+        base.ok().map(|d| d.join("TropicaliaCraft"))
+    }
+}
+
+fn write_unique(dir: &Path, name: &str, png: &[u8]) -> Result<PathBuf, String> {
+    let stem: String = name
+        .trim_end_matches(".png")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(60)
+        .collect();
+    let stem = if stem.is_empty() { "skin".to_string() } else { stem };
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let mut path = dir.join(format!("{stem}.png"));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{stem}-{n}.png"));
+        n += 1;
+    }
+    std::fs::write(&path, png).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+/// Salva uma foto 3D (`kind = "photo"`) ou o PNG 64x64 da skin (`kind = "skin"`) numa pasta
+/// pública (Imagens / Downloads). Se o sistema não deixar, cai para `<dados>/skins`.
+#[tauri::command]
+pub fn skin_export(app: AppHandle, kind: String, name: String, png: Vec<u8>) -> Result<String, String> {
+    check_png(&png)?;
+    if let Some(dir) = public_dir(&app, &kind) {
+        match write_unique(&dir, &name, &png) {
+            Ok(path) => return Ok(path.to_string_lossy().to_string()),
+            Err(e) => eprintln!("skin_export: {} indisponível ({e}); usando a pasta do launcher", dir.display()),
+        }
+    }
+    let path = write_unique(&paths::root(&app)?.join("skins"), &name, &png)?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Skin que o jogo usa com conta offline (Horizon: `HORIZON_OFFLINE_SKIN`).
+pub fn active_skin(app: &AppHandle) -> Option<(PathBuf, String)> {
+    let dir = paths::root(app).ok()?.join("skins");
+    let png = dir.join("active.png");
+    if !png.is_file() {
+        return None;
+    }
+    let model = std::fs::read_to_string(dir.join("active-model.txt")).unwrap_or_default();
+    let model = if model.trim() == "slim" { "slim" } else { "classic" };
+    Some((png, model.to_string()))
+}
+
+/// Define a skin que o cliente do launcher usa (botão USAR do Skin Studio).
+#[tauri::command]
+pub fn skin_use(app: AppHandle, png: Vec<u8>, slim: bool) -> Result<String, String> {
+    check_png(&png)?;
+    let dir = paths::root(&app)?.join("skins");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("active.png");
+    let tmp = dir.join("active.png.part");
+    std::fs::write(&tmp, &png).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("active-model.txt"), if slim { "slim" } else { "classic" })
+        .map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Tira a skin ativa: o jogo volta para Steve/Alex padrão do nick offline.
+#[tauri::command]
+pub fn skin_use_clear(app: AppHandle) -> Result<(), String> {
+    let dir = paths::root(&app)?.join("skins");
+    let _ = std::fs::remove_file(dir.join("active.png"));
+    let _ = std::fs::remove_file(dir.join("active-model.txt"));
+    Ok(())
+}
+
+/// Lê a skin ativa como PNG (para mostrar no Studio), se houver.
+#[tauri::command]
+pub fn skin_active(app: AppHandle) -> Option<serde_json::Value> {
+    let (path, model) = active_skin(&app)?;
+    let bytes = std::fs::read(path).ok()?;
+    Some(serde_json::json!({ "png": bytes, "slim": model == "slim" }))
+}
+
+/// Grava um PNG exportado pelo Skin Studio em `<dados>/skins/<nome>.png` e devolve o caminho.
+#[tauri::command]
+pub fn skin_save(app: AppHandle, name: String, png: Vec<u8>) -> Result<String, String> {
+    check_png(&png)?;
+    let stem: String = name
+        .trim_end_matches(".png")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(60)
+        .collect();
+    let stem = if stem.is_empty() { "skin".to_string() } else { stem };
+    let dir = paths::root(&app)?.join("skins");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut path = dir.join(format!("{stem}.png"));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{stem}-{n}.png"));
+        n += 1;
+    }
+    std::fs::write(&path, png).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
 }
 
 // ---------------------------------------------------------------- exportação

@@ -48,7 +48,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .build()?;
 
     let mut builder = TrayIconBuilder::with_id("main")
-        .tooltip("Tropicalia Launcher")
+        .tooltip("TropicaliaLauncher")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -102,10 +102,10 @@ pub async fn refresh(app: &AppHandle) {
     let _ = items.stop.set_enabled(!servers.is_empty());
     let _ = items.game.set_text(if games > 0 { "Jogo: aberto" } else { "Jogo: fechado" });
     let tip = match (games > 0, !servers.is_empty()) {
-        (true, true) => "Tropicalia Launcher — jogando + servidor ativo",
-        (true, false) => "Tropicalia Launcher — jogando",
-        (false, true) => "Tropicalia Launcher — servidor ativo",
-        _ => "Tropicalia Launcher",
+        (true, true) => "TropicaliaLauncher — jogando + servidor ativo",
+        (true, false) => "TropicaliaLauncher — jogando",
+        (false, true) => "TropicaliaLauncher — servidor ativo",
+        _ => "TropicaliaLauncher",
     };
     let _ = items.tray.set_tooltip(Some(tip));
 }

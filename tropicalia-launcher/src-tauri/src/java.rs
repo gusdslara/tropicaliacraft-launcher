@@ -74,13 +74,36 @@ fn java_bin(dir: &std::path::Path, console: bool) -> PathBuf {
     }
 }
 
-pub fn android_runtime_name(component: &str) -> &'static str {
+/// Versão do Java exigida por um componente da Mojang (jre-legacy = 8, gamma = 17, delta = 21...).
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn android_required_major(component: &str) -> u32 {
     match component {
-        "jre-legacy" => "Internal",
-        "java-runtime-alpha" | "java-runtime-beta" | "java-runtime-gamma" | "java-runtime-gamma-snapshot" => "Internal-17",
-        "java-runtime-delta" => "Internal-21",
-        _ => "Internal-25",
+        "jre-legacy" => 8,
+        "java-runtime-alpha" | "java-runtime-beta" | "java-runtime-gamma" | "java-runtime-gamma-snapshot" => 17,
+        "java-runtime-delta" => 21,
+        _ => 25,
     }
+}
+
+/// Runtimes aceitos para o componente, do preferido ao mais novo. Nunca um Java mais antigo que o
+/// exigido: um servidor 26.x no Java 8/17 nem abre (UnsupportedClassVersionError).
+/// O Java 8 do Android não roda fora do jogo (o JLI tenta se reexecutar por bin/java, bloqueado pelo
+/// Android), então para servidores antigos usamos o 17, que roda o vanilla dessas versões.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn android_candidates(component: &str) -> &'static [&'static str] {
+    match android_required_major(component) {
+        8 | 17 => &["Internal-17", "Internal-21", "Internal-25"],
+        21 => &["Internal-21", "Internal-25"],
+        _ => &["Internal-25"],
+    }
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn android_installed(rt_root: &std::path::Path, component: &str) -> Option<PathBuf> {
+    android_candidates(component)
+        .iter()
+        .map(|name| rt_root.join(name))
+        .find(|dir| dir.join("release").is_file())
 }
 
 pub fn android_native_lib_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -107,35 +130,71 @@ pub fn android_native_lib_dir(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 pub fn android_runtime_dir(app: &AppHandle, component: &str) -> Result<PathBuf, String> {
+    let rt_root = crate::paths::root(app)?.join("runtimes");
+    Ok(android_installed(&rt_root, component).unwrap_or_else(|| rt_root.join(android_candidates(component)[0])))
+}
+
+/// Pede ao lado Java do app (Pojav) para baixar e instalar o runtime — mesma fonte assinada que o
+/// jogo usa — e espera a resposta, repassando o progresso para a interface.
+#[cfg(target_os = "android")]
+async fn request_android_runtime(app: &AppHandle, owner: &str, major: u32) -> Result<(), String> {
     let root = crate::paths::root(app)?;
-    let data_dir = root.parent().unwrap_or(&root);
-    let rt_root = data_dir.join("runtimes");
-    let preferred = rt_root.join(android_runtime_name(component));
-    if preferred.join("release").exists() {
-        return Ok(preferred);
-    }
-    for fallback in ["Internal-25", "Internal-21", "Internal-17", "Internal"] {
-        let p = rt_root.join(fallback);
-        if p.join("release").exists() {
-            return Ok(p);
+    let ready = root.join("tropicalia-java-runtime-ready.json");
+    let _ = std::fs::remove_file(&ready);
+    let _ = std::fs::remove_file(root.join("tropicalia-progress.json"));
+    let temporary = root.join("tropicalia-java-runtime.tmp");
+    std::fs::write(&temporary, format!("{{\"major\":{major}}}")).map_err(|e| e.to_string())?;
+    std::fs::rename(&temporary, root.join("tropicalia-java-runtime.json")).map_err(|e| e.to_string())?;
+    download::emit(app, owner, "java", 0, 100, format!("Baixando Java {major} para Android…"));
+    let started = std::time::Instant::now();
+    loop {
+        if let Ok(raw) = std::fs::read_to_string(&ready) {
+            let _ = std::fs::remove_file(&ready);
+            let reply: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+            if let Some(err) = reply.get("error").and_then(serde_json::Value::as_str) {
+                return Err(format!("Não foi possível baixar o Java {major}: {err}. Verifique a internet e tente de novo."));
+            }
+            download::emit(app, owner, "java", 100, 100, format!("Java {major} pronto"));
+            return Ok(());
         }
+        if started.elapsed().as_secs() > 900 {
+            let _ = std::fs::remove_file(root.join("tropicalia-java-runtime.json"));
+            return Err(format!("O download do Java {major} demorou demais. Tente de novo com uma conexão melhor."));
+        }
+        if let Ok(raw) = std::fs::read_to_string(root.join("tropicalia-progress.json")) {
+            if let Ok(p) = serde_json::from_str::<serde_json::Value>(&raw) {
+                download::emit(
+                    app, owner, "java",
+                    p["current"].as_u64().unwrap_or(0) as usize,
+                    p["total"].as_u64().unwrap_or(100).max(1) as usize,
+                    p["message"].as_str().unwrap_or("Preparando Java…").to_string(),
+                );
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
     }
-    Ok(preferred)
 }
 
 pub fn configure_command(cmd: &mut tokio::process::Command, app: &AppHandle, component: &str) {
     #[cfg(target_os = "android")]
     {
         if let (Ok(rt_dir), Ok(native_dir)) = (android_runtime_dir(app, component), android_native_lib_dir(app)) {
-            let mut ld_paths = vec![
-                rt_dir.join("lib"),
-                rt_dir.join("lib/jli"),
-                rt_dir.join("lib/server"),
-                rt_dir.join("lib/aarch64"),
-                rt_dir.join("lib/aarch64/jli"),
-                rt_dir.join("lib/aarch64/server"),
-                native_dir,
-            ];
+            // A pasta do libjvm.so TEM que vir primeiro: se o LD_LIBRARY_PATH não começa por ela, o
+            // launcher do OpenJDK (JLI) se reexecuta via bin/java, que o Android proíbe executar
+            // ("trying to exec .../bin/java ... Permission denied") e o servidor cai na hora.
+            let jvm_dir = ["lib/server", "lib/aarch64/server"]
+                .iter()
+                .map(|p| rt_dir.join(p))
+                .find(|d| d.join("libjvm.so").is_file())
+                .unwrap_or_else(|| rt_dir.join("lib/server"));
+            let mut ld_paths = vec![jvm_dir.clone()];
+            for rel in ["lib", "lib/jli", "lib/aarch64", "lib/aarch64/jli", "lib/server", "lib/aarch64/server"] {
+                let p = rt_dir.join(rel);
+                if p != jvm_dir {
+                    ld_paths.push(p);
+                }
+            }
+            ld_paths.push(native_dir);
             if let Ok(existing) = std::env::var("LD_LIBRARY_PATH") {
                 if !existing.is_empty() {
                     ld_paths.push(PathBuf::from(existing));
@@ -168,25 +227,20 @@ pub async fn ensure(
     #[cfg(target_os = "android")]
     {
         let _ = (client, console);
-        let rt_name = android_runtime_name(component);
-        let root = crate::paths::root(app)?;
-        let data_dir = root.parent().unwrap_or(&root);
-        let rt_dir = data_dir.join("runtimes").join(rt_name);
-        for attempt in 0..75 {
-            if rt_dir.join("release").exists() {
-                break;
-            }
-            if attempt % 5 == 0 {
-                download::emit(app, owner, "java", attempt, 75, format!("Descompactando Java Android ({rt_name})…"));
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let rt_root = crate::paths::root(app)?.join("runtimes");
+        if android_installed(&rt_root, component).is_none() {
+            let major = match android_required_major(component) { 8 => 17, m => m };
+            request_android_runtime(app, owner, major).await?;
         }
-        let native_dir = android_native_lib_dir(app)?;
-        let exec = native_dir.join("libjava_exec.so");
-        if exec.exists() {
-            return Ok(exec);
+        let rt_dir = android_installed(&rt_root, component).ok_or_else(|| {
+            format!("O Java para Android não foi instalado em {}", rt_root.display())
+        })?;
+        let exec = android_native_lib_dir(app)?.join("libjava_exec.so");
+        if !exec.exists() {
+            return Err(format!("Executor Java Android não encontrado em {}", exec.display()));
         }
-        return Err(format!("Executor Java Android não encontrado em {}", exec.display()));
+        let _ = rt_dir;
+        return Ok(exec);
     }
 
     #[cfg(not(target_os = "android"))]

@@ -1,6 +1,8 @@
 <!-- Modal de Configuração Completa da Instância (Horizon Rust e Java Edition) -->
 <script lang="ts">
+    import { tr } from '$lib/ui-text';
 	import Modal from './Modal.svelte';
+    import { untrack } from 'svelte';
 	import PixelButton from './PixelButton.svelte';
 	import TabSelector from './TabSelector.svelte';
 	import BlockIcon from './BlockIcon.svelte';
@@ -11,10 +13,11 @@
 	import { call, isTauri, openFolder } from '$lib/platform';
 	import { loaderVersions, type LoaderVersion } from '$lib/services/versions';
 	import type { BlockIcon as BlockIconT, HorizonOptions, Instance, ModLoader } from '$lib/types';
-	import { BLOCK_ICONS, LOADER_LABEL } from '$lib/util/format';
+	import { BLOCK_ICONS, DEFAULT_LOADER_ICON, LOADER_LABEL, LOADER_TONE } from '$lib/util/format';
 	import {
 		Activity,
 		Check,
+		Copy,
 		Cpu,
 		Eye,
 		FolderOpen,
@@ -28,6 +31,7 @@
 		Sparkles,
 		Sun,
 		Terminal,
+		Trash2,
 		Volume2,
 		Wrench,
 		X
@@ -50,6 +54,12 @@
 	let draftLoaders = $state<LoaderVersion[]>([]);
 	let syncingHorizon = $state(false);
 	let extraArgsText = $state('');
+    let saving = $state(false);
+    let pendingMods = false;
+    let draftSession = 0;
+    let baseline = $state('');
+    let configModal: { close(): void } | undefined;
+    const dirty = $derived(!!draft && JSON.stringify({...draft, jvmArgs: extraArgsText}) !== baseline);
 
 	$effect(() => {
 		if (!open || !instance) {
@@ -57,7 +67,8 @@
 			return;
 		}
 
-		const d = structuredClone($state.snapshot(instance));
+		const session = ++draftSession;
+        const d = untrack(() => structuredClone($state.snapshot(instance)));
 		if (d.loader === 'horizon-rust') {
 			if (!d.horizonOptions) {
 				d.horizonOptions = {
@@ -148,8 +159,11 @@
 			if (isTauri) {
 				call<HorizonOptions>('horizon_options_get', { instanceId: d.id })
 					.then((opts) => {
-						if (draft && draft.id === d.id) {
-							draft.horizonOptions = { ...draft.horizonOptions, ...opts };
+						if (draft && draft.id === d.id && draftSession === session) {
+							if (!dirty) {
+                                draft.horizonOptions = { ...draft.horizonOptions, ...opts };
+                                baseline = JSON.stringify({...draft, jvmArgs: extraArgsText});
+                            }
 						}
 					})
 					.catch(() => {});
@@ -162,6 +176,7 @@
 
 		extraArgsText = d.jvmArgs || '';
 		draft = d;
+        baseline = JSON.stringify({...d, jvmArgs: d.jvmArgs || ''});
 		activeTab = 'general';
 	});
 
@@ -182,29 +197,34 @@
 		const isHz = draft?.loader === 'horizon-rust';
 		if (isHz) {
 			return [
-				{ id: 'general', label: '1. Geral' },
-				{ id: 'memory', label: '2. Memória & Execução' },
-				{ id: 'vulkan', label: '3. Vulkan & Gráficos' },
-				{ id: 'audio', label: '4. Áudio & Sons' },
-				{ id: 'camera', label: '5. Visão & HUD' },
-				{ id: 'extras', label: '6. Extras & Controles' },
-				{ id: 'hdr', label: '7. Saída HDR' },
+				{ id: 'general', label: tr("1. Geral") },
+				{ id: 'memory', label: tr("2. Memória & Execução") },
+				{ id: 'vulkan', label: tr("3. Vulkan & Gráficos") },
+				{ id: 'audio', label: tr("4. Áudio & Sons") },
+				{ id: 'camera', label: tr("5. Visão & HUD") },
+				{ id: 'extras', label: tr("6. Extras & Controles") },
+				{ id: 'hdr', label: tr("7. Saída HDR") },
 				{ id: 'logs', label: '8. Logs' }
 			];
 		}
 		return [
-			{ id: 'general', label: '1. Geral' },
-			{ id: 'memory', label: '2. Memória & Renderização Java' },
+			{ id: 'general', label: tr("1. Geral") },
+			{ id: 'memory', label: tr("2. Memória & Renderização Java") },
 			{ id: 'logs', label: '3. Logs' }
 		];
 	});
 
-	async function save() {
-		if (!draft || !instance) return;
-
-		draft.jvmArgs = extraArgsText.trim();
-
-		app.updateInstance(instance.id, {
+    async function save() {
+        if (!draft || !instance || saving) return;
+        saving = true;
+        try {
+            if (!draft.name.trim()) throw new Error(tr('Informe o nome da instância.'));
+            if (!Number.isFinite(draft.memory.maxMb) || draft.memory.minMb > draft.memory.maxMb) throw new Error(tr('Limites de memória inválidos.'));
+            draft.jvmArgs = extraArgsText.trim();
+            if (draft.loader === 'horizon-rust' && draft.horizonOptions && isTauri) {
+                await call('horizon_options_set', { instanceId: instance.id, options: draft.horizonOptions });
+            }
+		await app.updateInstance(instance.id, {
 			name: draft.name,
 			icon: draft.icon,
 			loader: draft.loader,
@@ -222,22 +242,13 @@
 			resolution: draft.resolution,
 			autoJoin: draft.autoJoin
 		});
-
-		if (draft.loader === 'horizon-rust' && draft.horizonOptions && isTauri) {
-			try {
-				await call('horizon_options_set', {
-					instanceId: instance.id,
-					options: draft.horizonOptions
-				});
-			} catch (e) {
-				console.error('Falha ao persistir opções nos arquivos do Horizon:', e);
-			}
-		}
-
-		toasts.ok(`Configurações de "${draft.name}" salvas com sucesso!`);
-		onupdated?.(draft);
-		open = false;
-	}
+            baseline = JSON.stringify({...draft, jvmArgs: extraArgsText});
+            toasts.ok(tr('Configurações salvas com sucesso!'));
+            onupdated?.(draft);
+            open = false;
+        } catch (e) { toasts.err(e); throw e; }
+        finally { saving = false; }
+    }
 
 	async function syncHorizonResources() {
 		if (!draft) return;
@@ -253,7 +264,7 @@
 	}
 </script>
 
-<Modal bind:open title="Configuração da Instância" width={940}>
+<Modal bind:this={configModal} bind:open title={tr("Configuração da Instância")} width={940} {dirty} onsave={save} oncancel={() => pendingMods = false} dismissable={!saving} onclose={() => { if (pendingMods && instance) { pendingMods = false; onopenmods?.(instance); } }}>
 	{#if draft}
 		<div class="flex flex-col gap-4">
 			<!-- Header Resumo da Instância -->
@@ -263,20 +274,48 @@
 					<div class="min-w-0">
 						<h3 class="font-mc mc-shadow text-[16px] text-white truncate">{draft.name}</h3>
 						<div class="flex flex-wrap items-center gap-1.5 mt-0.5">
-							{#if draft.loader === 'horizon-rust'}
-								<Badge tone="green" pixel>Horizon Rust 26.3 · Vulkan</Badge>
-							{:else}
-								<Badge tone="blue" pixel>{LOADER_LABEL[draft.loader]} {draft.gameVersion}</Badge>
-							{/if}
+							<Badge tone={LOADER_TONE[draft.loader] ?? 'green'} pixel>{LOADER_LABEL[draft.loader] ?? draft.loader}</Badge>
+							<Badge tone="blue" pixel>{draft.gameVersion}</Badge>
 							<Badge tone="muted">{(draft.memory.maxMb / 1024).toFixed(1)} GB Limite</Badge>
-							<Badge tone="muted">{Object.keys(draft.content).length} itens</Badge>
 						</div>
 					</div>
 				</div>
-				<div class="flex items-center gap-2">
+				<div class="flex flex-wrap items-center gap-2">
 					<PixelButton size="sm" variant="ghost" icon={FolderOpen} onclick={() => openFolder('instance', draft!.id).catch(toasts.err)}>
-						Abrir pasta
+						{tr("Abrir pasta")}
 					</PixelButton>
+					<PixelButton
+						size="sm"
+						variant="ghost"
+						icon={Copy}
+						onclick={async () => {
+							if (!instance) return;
+							try {
+								const copy = await app.cloneInstance(instance, `${instance.name} (cópia)`);
+								toasts.ok(`Instância clonada como "${copy.name}"`);
+							} catch (e) {
+								toasts.err(e);
+							}
+						}}
+					>
+						{tr("Clonar")}
+					</PixelButton>
+					{#if app.instances.length > 1}
+						<PixelButton
+							size="sm"
+							variant="danger"
+							icon={Trash2}
+							onclick={async () => {
+								if (!instance) return;
+								const id = instance.id;
+								open = false;
+								await app.deleteInstance(id);
+								toasts.info('Instância excluída.');
+							}}
+						>
+							{tr("Excluir")}
+						</PixelButton>
+					{/if}
 				</div>
 			</div>
 
@@ -291,11 +330,11 @@
 			{#if activeTab === 'general'}
 				<div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
 					<div>
-						<label class="tp-label" for="cfg-name">Nome da Instância</label>
+						<label class="tp-label" for="cfg-name">{tr("Nome da Instância")}</label>
 						<input id="cfg-name" class="tp-input" bind:value={draft.name} />
 					</div>
 					<div>
-						<span class="tp-label">Ícone do Bloco</span>
+						<span class="tp-label">{tr("Ícone do Bloco")}</span>
 						<div class="flex flex-wrap gap-2">
 							{#each Object.keys(BLOCK_ICONS) as key (key)}
 								<button
@@ -313,13 +352,14 @@
 					</div>
 
 					<div>
-						<label class="tp-label" for="cfg-loader">Motor da Instância / Loader</label>
+						<label class="tp-label" for="cfg-loader">{tr("Tipo de Minecraft")}</label>
 						<select
 							id="cfg-loader"
 							class="tp-select"
 							bind:value={draft.loader}
 							onchange={(e) => {
 								const val = (e.currentTarget as HTMLSelectElement).value as ModLoader;
+								draft!.icon = DEFAULT_LOADER_ICON[val] ?? draft!.icon;
 								if (val === 'horizon-rust') {
 									draft!.gameVersion = '26.3';
 									draft!.engine = 'rust';
@@ -329,12 +369,10 @@
 								}
 							}}
 						>
-							<option value="horizon-rust">Horizon Rust (Minecraft 26.3 · Vulkan Nativo sem JVM)</option>
-							<option value="fabric">Fabric (Java Edition · Suporte a Mods e Shaders)</option>
-							<option value="forge">Forge (Java Edition · Mods clássicos)</option>
-							<option value="neoforge">NeoForge (Java Edition · Sucessor do Forge)</option>
-							<option value="quilt">Quilt (Java Edition · Compatível com Fabric)</option>
-							<option value="vanilla">Vanilla Oficial (Java Edition Mojang)</option>
+							<option value="horizon-rust">Rust (Minecraft 26.3 · Vulkan Nativo)</option>
+							<option value="fabric">Fabric (Java Edition)</option>
+							<option value="vanilla">Vanilla (Java Edition)</option>
+							<option value="forge">Forge (Java Edition)</option>
 						</select>
 						<p class="tp-help">
 							{#if draft.loader === 'horizon-rust'}
@@ -346,18 +384,18 @@
 					</div>
 
 					<div>
-						<label class="tp-label" for="cfg-mc">Versão do Jogo</label>
+						<label class="tp-label" for="cfg-mc">{tr("Versão do Jogo")}</label>
 						<input id="cfg-mc" class="tp-input font-mono" disabled={draft.loader === 'horizon-rust'} bind:value={draft.gameVersion} />
 						{#if draft.loader === 'horizon-rust'}
 							<p class="tp-help">O motor Horizon Rust compila contra a paridade 26.3.</p>
 						{:else}
-							<p class="tp-help">Alterar a versão pode exigir reconfigurar seus mods.</p>
+							<p class="tp-help">{tr("Alterar a versão pode exigir reconfigurar seus mods.")}</p>
 						{/if}
 					</div>
 
 					{#if draft.loader !== 'horizon-rust'}
 						<div>
-							<label class="tp-label" for="cfg-lv">Versão do {LOADER_LABEL[draft.loader]}</label>
+							<label class="tp-label" for="cfg-lv">{tr("Versão do")} {LOADER_LABEL[draft.loader]}</label>
 							{#if draft.loader === 'vanilla'}
 								<input id="cfg-lv" class="tp-input" value="Vanilla Mojang (sem loader)" disabled />
 							{:else if draftLoaders.length}
@@ -371,8 +409,8 @@
 					{/if}
 
 					<div>
-						<label class="tp-label" for="cfg-w">Resolução da Janela</label>
-						<div class="flex items-center gap-2">
+						<label class="tp-label" for="cfg-w">{tr("Resolução da Janela")}</label>
+						<div class="flex flex-wrap items-center gap-2">
 							<input
 								id="cfg-w"
 								class="tp-input"
@@ -397,13 +435,13 @@
 								}}
 							/>
 						</div>
-						<p class="tp-help">Deixe em branco para usar o padrão da sua tela.</p>
+						<p class="tp-help">{tr("Deixe em branco para usar o padrão da sua tela.")}</p>
 					</div>
 
 					<div>
-						<label class="tp-label" for="cfg-join">Entrar Direto no Servidor (Auto-Join)</label>
+						<label class="tp-label" for="cfg-join">{tr("Entrar Direto no Servidor (Auto-Join)")}</label>
 						<input id="cfg-join" class="tp-input font-mono" placeholder="Ex.: tropicaliacraft.online" bind:value={draft.autoJoin} />
-						<p class="tp-help">Ao clicar em Jogar, conecta diretamente no endereço IP fornecido.</p>
+						<p class="tp-help">{tr("Ao clicar em Jogar, conecta diretamente no endereço IP fornecido.")}</p>
 					</div>
 				</div>
 
@@ -430,7 +468,7 @@
 						</div>
 						<input id="cfg-ram" type="range" class="tp-range" min="512" max={maxRam} step="512" bind:value={draft.memory.maxMb} />
 						<div class="flex justify-between text-[11px] tp-muted font-mono">
-							<span>512 MB (Mínimo)</span>
+							<span>{tr("512 MB (Mínimo)")}</span>
 							<span>Recomendado: {draft.loader === 'horizon-rust' ? '2.0 GB' : '4.0 GB'}</span>
 							<span>{maxRam / 1024} GB (Disponível no PC)</span>
 						</div>
@@ -443,8 +481,8 @@
 								<div class="flex items-center gap-3">
 									<Terminal size={20} class="text-[#34d399]" />
 									<div>
-										<h4 class="font-mc text-[13px] text-white">Parâmetros Nativos do Horizon Rust</h4>
-										<p class="tp-muted text-[11.5px]">Flags de depuração da engine nativa aceitas diretamente pelo cliente.</p>
+										<h4 class="font-mc text-[13px] text-white">{tr("Parâmetros Nativos do Horizon Rust")}</h4>
+										<p class="tp-muted text-[11.5px]">{tr("Flags de depuração da engine nativa aceitas diretamente pelo cliente.")}</p>
 									</div>
 								</div>
 								<PixelButton size="sm" variant="emerald" icon={Wrench} loading={syncingHorizon} onclick={syncHorizonResources}>
@@ -455,28 +493,28 @@
 							<div class="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-[#0a1410] p-3 rounded border border-[#1b2b22]">
 								<label class="flex items-center justify-between text-[12px] text-[#d1d5db] cursor-pointer">
 									<div>
-										<span class="block font-semibold">Modo Criativo</span>
+										<span class="block font-semibold">{tr("Modo Criativo")}</span>
 										<small class="tp-muted text-[10px]">--creative</small>
 									</div>
 									<Toggle checked={draft.horizonOptions?.creative ?? false} onchange={(v) => (draft!.horizonOptions!.creative = v)} />
 								</label>
 								<label class="flex items-center justify-between text-[12px] text-[#d1d5db] cursor-pointer">
 									<div>
-										<span class="block font-semibold">Terreno de Teste</span>
+										<span class="block font-semibold">{tr("Terreno de Teste")}</span>
 										<small class="tp-muted text-[10px]">--test-terrain</small>
 									</div>
 									<Toggle checked={draft.horizonOptions?.testTerrain ?? false} onchange={(v) => (draft!.horizonOptions!.testTerrain = v)} />
 								</label>
 								<label class="flex items-center justify-between text-[12px] text-[#d1d5db] cursor-pointer">
 									<div>
-										<span class="block font-semibold">Pré-gerador Chunks</span>
+										<span class="block font-semibold">{tr("Pré-gerador Chunks")}</span>
 										<small class="tp-muted text-[10px]">--pregen</small>
 									</div>
 									<Toggle checked={draft.horizonOptions?.pregen ?? false} onchange={(v) => (draft!.horizonOptions!.pregen = v)} />
 								</label>
 								<label class="flex items-center justify-between text-[12px] text-[#d1d5db] cursor-pointer">
 									<div>
-										<span class="block font-semibold">Socket Agente</span>
+										<span class="block font-semibold">{tr("Socket Agente")}</span>
 										<small class="tp-muted text-[10px]">--control</small>
 									</div>
 									<Toggle checked={draft.horizonOptions?.agentControl ?? false} onchange={(v) => (draft!.horizonOptions!.agentControl = v)} />
@@ -485,14 +523,14 @@
 
 							<div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
 								<div>
-									<label class="tp-label" for="hz-custom-bin">Executável Customizado (Opcional)</label>
-									<input id="hz-custom-bin" class="tp-input font-mono text-[11px]" placeholder="Automático (horizon-client.exe oficial)" bind:value={draft.rustBinaryPath} />
-									<p class="tp-help">Deixe em branco para usar o binário nativo pré-instalado pelo launcher.</p>
+									<label class="tp-label" for="hz-custom-bin">{tr("Executável Customizado (Opcional)")}</label>
+									<input id="hz-custom-bin" class="tp-input font-mono text-[11px]" placeholder={tr("Automático (horizon-client.exe oficial)")} bind:value={draft.rustBinaryPath} />
+									<p class="tp-help">{tr("Deixe em branco para usar o binário nativo pré-instalado pelo launcher.")}</p>
 								</div>
 								<div>
-									<label class="tp-label" for="hz-custom-args">Parâmetros Extras da Linha de Comando</label>
+									<label class="tp-label" for="hz-custom-args">{tr("Parâmetros Extras da Linha de Comando")}</label>
 									<input id="hz-custom-args" class="tp-input font-mono text-[11px]" placeholder="Ex.: --smoke-report ./report.json" bind:value={extraArgsText} />
-									<p class="tp-help">Argumentos adicionais passados ao iniciar o horizon-client.</p>
+									<p class="tp-help">{tr("Argumentos adicionais passados ao iniciar o horizon-client.")}</p>
 								</div>
 							</div>
 						</div>
@@ -502,25 +540,25 @@
 							<div class="flex items-center gap-3">
 								<Monitor size={20} class="text-[#60a5fa]" />
 								<div>
-									<h4 class="font-mc text-[13px] text-white">Configurações da JVM e Renderizador Java</h4>
-									<p class="tp-muted text-[11.5px]">Ajustes de renderização gráfica acelerada por hardware e máquina virtual.</p>
+									<h4 class="font-mc text-[13px] text-white">{tr("Configurações da JVM e Renderizador Java")}</h4>
+									<p class="tp-muted text-[11.5px]">{tr("Ajustes de renderização gráfica acelerada por hardware e máquina virtual.")}</p>
 								</div>
 							</div>
 
 							<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
 								<div>
-									<label class="tp-label" for="j-rdr">Renderizador Gráfico Java</label>
+									<label class="tp-label" for="j-rdr">{tr("Renderizador Gráfico Java")}</label>
 									<select id="j-rdr" class="tp-select" bind:value={draft.javaRenderer}>
-										<option value="opengles_mobileglues">Holy GL4ES / MobileGlues (Padrão · Alto desempenho com Shaders)</option>
+										<option value="opengles_mobileglues">{tr("Holy GL4ES / MobileGlues (Padrão · Alto desempenho com Shaders)")}</option>
 										<option value="opengles3_desktopgl_zink_kopper">Vulkan Zink Kopper (Desktop OpenGL sobre Vulkan)</option>
 										<option value="vulkan_zink">Vulkan Zink OSMesa</option>
 										<option value="opengles2">NG-GL4ES Legado</option>
 									</select>
 								</div>
 								<div>
-									<label class="tp-label" for="j-jre">Ambiente Java Runtime (JRE)</label>
+									<label class="tp-label" for="j-jre">{tr("Ambiente Java Runtime (JRE)")}</label>
 									<select id="j-jre" class="tp-select" bind:value={draft.javaRuntime}>
-										<option value="">Automático (Detectado conforme versão do MC)</option>
+										<option value="">{tr("Automático (Detectado conforme versão do MC)")}</option>
 										<option value="Internal-25">Java 25 (OpenJDK 25 · 16KB Aligned)</option>
 										<option value="Internal-21">Java 21 (OpenJDK 21 LTS · 1.20.5+)</option>
 										<option value="Internal-17">Java 17 (OpenJDK 17 LTS · 1.18 - 1.20.4)</option>
@@ -529,18 +567,18 @@
 								</div>
 								<div class="col-span-1 md:col-span-2 bg-[#09131f] p-3 rounded border border-[#1b2b3a] flex items-center justify-between">
 									<div>
-										<span class="block text-[12.5px] font-semibold text-white">Aceleração Google ANGLE (OpenGL ES sobre Vulkan)</span>
-										<small class="tp-muted text-[11px]">Melhora a taxa de quadros e estabilidade em drivers gráficos modernos.</small>
+										<span class="block text-[12.5px] font-semibold text-white">{tr("Aceleração Google ANGLE (OpenGL ES sobre Vulkan)")}</span>
+										<small class="tp-muted text-[11px]">{tr("Melhora a taxa de quadros e estabilidade em drivers gráficos modernos.")}</small>
 									</div>
 									<Toggle checked={draft.useAngle ?? false} onchange={(v) => (draft!.useAngle = v)} />
 								</div>
 								<div class="col-span-1 md:col-span-2">
-									<label class="tp-label" for="j-jvm-args">Argumentos Extras da JVM</label>
+									<label class="tp-label" for="j-jvm-args">{tr("Argumentos Extras da JVM")}</label>
 									<input id="j-jvm-args" class="tp-input font-mono" placeholder="-Dfml.ignoreInvalidMinecraftCertificates=true" bind:value={extraArgsText} />
 								</div>
 								<div class="col-span-1 md:col-span-2">
-									<label class="tp-label" for="j-path">Caminho Customizado do Java (Opcional)</label>
-									<input id="j-path" class="tp-input font-mono" placeholder="Automático (Java oficial da Mojang)" bind:value={draft.javaPath} />
+									<label class="tp-label" for="j-path">{tr("Caminho Customizado do Java (Opcional)")}</label>
+									<input id="j-path" class="tp-input font-mono" placeholder={tr("Automático (Java oficial da Mojang)")} bind:value={draft.javaPath} />
 								</div>
 							</div>
 						</div>
@@ -552,18 +590,18 @@
 				<div class="space-y-4">
 					<div class="grid grid-cols-1 md:grid-cols-3 gap-4">
 						<div>
-							<label class="tp-label" for="hz-m-preset">Preset Gráfico</label>
+							<label class="tp-label" for="hz-m-preset">{tr("Preset Gráfico")}</label>
 							<select id="hz-m-preset" class="tp-select" bind:value={draft.horizonOptions!.preset}>
-								<option value="performance">Desempenho (Performance)</option>
-								<option value="balanced">Equilibrado (Balanced)</option>
-								<option value="quality">Qualidade (Quality)</option>
+								<option value="performance">{tr("Desempenho (Performance)")}</option>
+								<option value="balanced">{tr("Equilibrado (Balanced)")}</option>
+								<option value="quality">{tr("Qualidade (Quality)")}</option>
 								<option value="ultra">Ultra</option>
-								<option value="custom">Personalizado (Custom)</option>
+								<option value="custom">{tr("Personalizado (Custom)")}</option>
 							</select>
 						</div>
 						<div>
 							<div class="flex justify-between items-baseline mb-1">
-								<label class="tp-label" for="hz-m-rd">Distância de Renderização</label>
+								<label class="tp-label" for="hz-m-rd">{tr("Distância de Renderização")}</label>
 								<span class="font-mono text-[12px] text-[#bef264] font-bold">{draft.horizonOptions?.renderDistance ?? 12} chunks</span>
 							</div>
 							<input id="hz-m-rd" type="range" class="tp-range" min="2" max="64" step="1" bind:value={draft.horizonOptions!.renderDistance} />
@@ -581,38 +619,38 @@
 
 					<div class="grid grid-cols-1 md:grid-cols-4 gap-4">
 						<div>
-							<label class="tp-label" for="hz-m-fardetail">Detalhe Distante</label>
+							<label class="tp-label" for="hz-m-fardetail">{tr("Detalhe Distante")}</label>
 							<select id="hz-m-fardetail" class="tp-select" bind:value={draft.horizonOptions!.farDetail}>
-								<option value="full">Completo (Full)</option>
-								<option value="reduced">Reduzido (Reduced)</option>
-								<option value="simple">Simples (Simple)</option>
-								<option value="off">Desligado (Off)</option>
+								<option value="full">{tr("Completo (Full)")}</option>
+								<option value="reduced">{tr("Reduzido (Reduced)")}</option>
+								<option value="simple">{tr("Simples (Simple)")}</option>
+								<option value="off">{tr("Desligado (Off)")}</option>
 							</select>
 						</div>
 						<div>
-							<label class="tp-label" for="hz-m-fpslim">Limite de FPS</label>
+							<label class="tp-label" for="hz-m-fpslim">{tr("Limite de FPS")}</label>
 							<select id="hz-m-fpslim" class="tp-select" bind:value={draft.horizonOptions!.framerateLimit}>
 								<option value={30}>30 FPS</option>
 								<option value={60}>60 FPS</option>
 								<option value={120}>120 FPS</option>
 								<option value={144}>144 FPS</option>
 								<option value={240}>240 FPS</option>
-								<option value={260}>Ilimitado</option>
+								<option value={260}>{tr("Ilimitado")}</option>
 							</select>
 						</div>
 						<div>
-							<label class="tp-label" for="hz-m-present">Modo de Apresentação (VSync)</label>
+							<label class="tp-label" for="hz-m-present">{tr("Modo de Apresentação (VSync)")}</label>
 							<select id="hz-m-present" class="tp-select" bind:value={draft.horizonOptions!.presentMode}>
-								<option value="auto">Automático (Auto)</option>
-								<option value="fifo">VSync Tradicional (Fifo)</option>
-								<option value="mailbox">Mailbox (Sem tearing, baixa latência)</option>
-								<option value="immediate">Imediato (Menor latência)</option>
+								<option value="auto">{tr("Automático (Auto)")}</option>
+								<option value="fifo">{tr("VSync Tradicional (Fifo)")}</option>
+								<option value="mailbox">{tr("Mailbox (Sem tearing, baixa latência)")}</option>
+								<option value="immediate">{tr("Imediato (Menor latência)")}</option>
 							</select>
 						</div>
 						<div>
 							<label class="tp-label" for="hz-m-aa">Anti-Aliasing</label>
 							<select id="hz-m-aa" class="tp-select" bind:value={draft.horizonOptions!.antialiasing}>
-								<option value="off">Desativado</option>
+								<option value="off">{tr("Desativado")}</option>
 								<option value="fxaa">FXAA</option>
 								<option value="taa">TAA (Temporal)</option>
 							</select>
@@ -621,27 +659,27 @@
 
 					<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
 						<div>
-							<label class="tp-label" for="hz-m-upscale">Upscaling Gráfico</label>
+							<label class="tp-label" for="hz-m-upscale">{tr("Upscaling Gráfico")}</label>
 							<select id="hz-m-upscale" class="tp-select" bind:value={draft.horizonOptions!.upscaling}>
-								<option value="native">Nativo (100%)</option>
-								<option value="quality">Qualidade</option>
-								<option value="balanced">Equilibrado</option>
-								<option value="performance">Desempenho</option>
-								<option value="ultraPerformance">Ultra Desempenho</option>
+								<option value="native">{tr("Nativo (100%)")}</option>
+								<option value="quality">{tr("Qualidade")}</option>
+								<option value="balanced">{tr("Equilibrado")}</option>
+								<option value="performance">{tr("Desempenho")}</option>
+								<option value="ultraPerformance">{tr("Ultra Desempenho")}</option>
 							</select>
 						</div>
 						<div>
-							<label class="tp-label" for="hz-m-api">Backend Gráfico</label>
+							<label class="tp-label" for="hz-m-api">{tr("Backend Gráfico")}</label>
 							<select id="hz-m-api" class="tp-select" bind:value={draft.horizonOptions!.graphicsApi}>
-								<option value="auto">Automático (Vulkan preferencial)</option>
-								<option value="vulkan">Vulkan Nativo</option>
+								<option value="auto">{tr("Automático (Vulkan preferencial)")}</option>
+								<option value="vulkan">{tr("Vulkan Nativo")}</option>
 								<option value="dx12">DirectX 12</option>
 								<option value="opengl">OpenGL</option>
 							</select>
 						</div>
 					</div>
 
-					<div class="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-[#0d1612] p-3 rounded border border-[#1b2b22]">
+					<div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 bg-[#0d1612] p-3 rounded border border-[#1b2b22]">
 						<label class="flex items-center justify-between text-[12px] text-[#d1d5db] cursor-pointer">
 							<span>Cave Culling</span>
 							<Toggle checked={draft.horizonOptions?.caveCulling ?? true} onchange={(v) => (draft!.horizonOptions!.caveCulling = v)} />
@@ -651,7 +689,7 @@
 							<Toggle checked={draft.horizonOptions?.entityCulling ?? false} onchange={(v) => (draft!.horizonOptions!.entityCulling = v)} />
 						</label>
 						<label class="flex items-center justify-between text-[12px] text-[#d1d5db] cursor-pointer">
-							<span>Texturas Animadas</span>
+							<span>{tr("Texturas Animadas")}</span>
 							<Toggle checked={draft.horizonOptions?.animatedTextures ?? true} onchange={(v) => (draft!.horizonOptions!.animatedTextures = v)} />
 						</label>
 						<label class="flex items-center justify-between text-[12px] text-[#d1d5db] cursor-pointer">
@@ -659,19 +697,19 @@
 							<Toggle checked={draft.horizonOptions?.ditherCutoutMips ?? true} onchange={(v) => (draft!.horizonOptions!.ditherCutoutMips = v)} />
 						</label>
 						<label class="flex items-center justify-between text-[12px] text-[#d1d5db] cursor-pointer">
-							<span>Céu & Estrelas</span>
+							<span>{tr("Céu & Estrelas")}</span>
 							<Toggle checked={draft.horizonOptions?.sky ?? true} onchange={(v) => (draft!.horizonOptions!.sky = v)} />
 						</label>
 						<label class="flex items-center justify-between text-[12px] text-[#d1d5db] cursor-pointer">
-							<span>Neblina (Fog)</span>
+							<span>{tr("Neblina (Fog)")}</span>
 							<Toggle checked={draft.horizonOptions?.fog ?? true} onchange={(v) => (draft!.horizonOptions!.fog = v)} />
 						</label>
 						<label class="flex items-center justify-between text-[12px] text-[#d1d5db] cursor-pointer">
-							<span>Clima (Chuva/Neve)</span>
+							<span>{tr("Clima (Chuva/Neve)")}</span>
 							<Toggle checked={draft.horizonOptions?.weather ?? true} onchange={(v) => (draft!.horizonOptions!.weather = v)} />
 						</label>
 						<label class="flex items-center justify-between text-[12px] text-[#d1d5db] cursor-pointer">
-							<span>Cache de Sombras</span>
+							<span>{tr("Cache de Sombras")}</span>
 							<Toggle checked={draft.horizonOptions?.shadowCache ?? false} onchange={(v) => (draft!.horizonOptions!.shadowCache = v)} />
 						</label>
 					</div>
@@ -683,63 +721,63 @@
 					<div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
 						<div>
 							<div class="flex justify-between items-baseline mb-1">
-								<label class="tp-label" for="hz-m-vol-master">Volume Geral (Master)</label>
+								<label class="tp-label" for="hz-m-vol-master">{tr("Volume Geral (Master)")}</label>
 								<span class="font-mono text-[12px] text-[#bef264] font-bold">{draft.horizonOptions?.soundMaster ?? 100}%</span>
 							</div>
 							<input id="hz-m-vol-master" type="range" class="tp-range" min="0" max="100" step="1" bind:value={draft.horizonOptions!.soundMaster} />
 						</div>
 						<div>
 							<div class="flex justify-between items-baseline mb-1">
-								<label class="tp-label" for="hz-m-vol-music">Música</label>
+								<label class="tp-label" for="hz-m-vol-music">{tr("Música")}</label>
 								<span class="font-mono text-[12px] text-[#bef264] font-bold">{draft.horizonOptions?.soundMusic ?? 100}%</span>
 							</div>
 							<input id="hz-m-vol-music" type="range" class="tp-range" min="0" max="100" step="1" bind:value={draft.horizonOptions!.soundMusic} />
 						</div>
 						<div>
 							<div class="flex justify-between items-baseline mb-1">
-								<label class="tp-label" for="hz-m-vol-weather">Clima / Chuva</label>
+								<label class="tp-label" for="hz-m-vol-weather">{tr("Clima / Chuva")}</label>
 								<span class="font-mono text-[12px] text-[#bef264] font-bold">{draft.horizonOptions?.soundWeather ?? 100}%</span>
 							</div>
 							<input id="hz-m-vol-weather" type="range" class="tp-range" min="0" max="100" step="1" bind:value={draft.horizonOptions!.soundWeather} />
 						</div>
 						<div>
 							<div class="flex justify-between items-baseline mb-1">
-								<label class="tp-label" for="hz-m-vol-block">Sons de Blocos</label>
+								<label class="tp-label" for="hz-m-vol-block">{tr("Sons de Blocos")}</label>
 								<span class="font-mono text-[12px] text-[#bef264] font-bold">{draft.horizonOptions?.soundBlocks ?? 100}%</span>
 							</div>
 							<input id="hz-m-vol-block" type="range" class="tp-range" min="0" max="100" step="1" bind:value={draft.horizonOptions!.soundBlocks} />
 						</div>
 						<div>
 							<div class="flex justify-between items-baseline mb-1">
-								<label class="tp-label" for="hz-m-vol-hostile">Criaturas Hostis</label>
+								<label class="tp-label" for="hz-m-vol-hostile">{tr("Criaturas Hostis")}</label>
 								<span class="font-mono text-[12px] text-[#bef264] font-bold">{draft.horizonOptions?.soundHostile ?? 100}%</span>
 							</div>
 							<input id="hz-m-vol-hostile" type="range" class="tp-range" min="0" max="100" step="1" bind:value={draft.horizonOptions!.soundHostile} />
 						</div>
 						<div>
 							<div class="flex justify-between items-baseline mb-1">
-								<label class="tp-label" for="hz-m-vol-neutral">Criaturas Pacíficas</label>
+								<label class="tp-label" for="hz-m-vol-neutral">{tr("Criaturas Pacíficas")}</label>
 								<span class="font-mono text-[12px] text-[#bef264] font-bold">{draft.horizonOptions?.soundNeutral ?? 100}%</span>
 							</div>
 							<input id="hz-m-vol-neutral" type="range" class="tp-range" min="0" max="100" step="1" bind:value={draft.horizonOptions!.soundNeutral} />
 						</div>
 						<div>
 							<div class="flex justify-between items-baseline mb-1">
-								<label class="tp-label" for="hz-m-vol-players">Jogadores</label>
+								<label class="tp-label" for="hz-m-vol-players">{tr("Jogadores")}</label>
 								<span class="font-mono text-[12px] text-[#bef264] font-bold">{draft.horizonOptions?.soundPlayers ?? 100}%</span>
 							</div>
 							<input id="hz-m-vol-players" type="range" class="tp-range" min="0" max="100" step="1" bind:value={draft.horizonOptions!.soundPlayers} />
 						</div>
 						<div>
 							<div class="flex justify-between items-baseline mb-1">
-								<label class="tp-label" for="hz-m-vol-ambient">Ambiente / Cavernas</label>
+								<label class="tp-label" for="hz-m-vol-ambient">{tr("Ambiente / Cavernas")}</label>
 								<span class="font-mono text-[12px] text-[#bef264] font-bold">{draft.horizonOptions?.soundAmbient ?? 100}%</span>
 							</div>
 							<input id="hz-m-vol-ambient" type="range" class="tp-range" min="0" max="100" step="1" bind:value={draft.horizonOptions!.soundAmbient} />
 						</div>
 						<div>
 							<div class="flex justify-between items-baseline mb-1">
-								<label class="tp-label" for="hz-m-vol-voice">Voz / Fala</label>
+								<label class="tp-label" for="hz-m-vol-voice">{tr("Voz / Fala")}</label>
 								<span class="font-mono text-[12px] text-[#bef264] font-bold">{draft.horizonOptions?.soundVoice ?? 100}%</span>
 							</div>
 							<input id="hz-m-vol-voice" type="range" class="tp-range" min="0" max="100" step="1" bind:value={draft.horizonOptions!.soundVoice} />
@@ -749,15 +787,15 @@
 					<div class="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-[#0d1612] p-3 rounded border border-[#1b2b22]">
 						<label class="flex items-center justify-between text-[12px] text-[#d1d5db] cursor-pointer">
 							<div>
-								<span>Áudio Espacial 3D (HRTF Direcional)</span>
-								<small class="block tp-muted text-[10.5px]">Melhor posicionamento espacial em fones de ouvido.</small>
+								<span>{tr("Áudio Espacial 3D (HRTF Direcional)")}</span>
+								<small class="block tp-muted text-[10.5px]">{tr("Melhor posicionamento espacial em fones de ouvido.")}</small>
 							</div>
 							<Toggle checked={draft.horizonOptions?.directionalAudio ?? false} onchange={(v) => (draft!.horizonOptions!.directionalAudio = v)} />
 						</label>
 						<label class="flex items-center justify-between text-[12px] text-[#d1d5db] cursor-pointer">
 							<div>
-								<span>Exibir Legendas de Som</span>
-								<small class="block tp-muted text-[10.5px]">Mostra indicadores de som no canto da tela.</small>
+								<span>{tr("Exibir Legendas de Som")}</span>
+								<small class="block tp-muted text-[10.5px]">{tr("Mostra indicadores de som no canto da tela.")}</small>
 							</div>
 							<Toggle checked={draft.horizonOptions?.subtitles ?? false} onchange={(v) => (draft!.horizonOptions!.subtitles = v)} />
 						</label>
@@ -770,7 +808,7 @@
 					<div class="grid grid-cols-1 md:grid-cols-3 gap-4">
 						<div>
 							<div class="flex justify-between items-baseline mb-1">
-								<label class="tp-label" for="hz-m-fov">Campo de Visão (FOV)</label>
+								<label class="tp-label" for="hz-m-fov">{tr("Campo de Visão (FOV)")}</label>
 								<span class="font-mono text-[12px] text-[#bef264] font-bold">
 									{draft.horizonOptions?.fov ?? 70}° {draft.horizonOptions?.fov === 70 ? '(Normal)' : draft.horizonOptions?.fov === 110 ? '(Quake Pro)' : ''}
 								</span>
@@ -779,14 +817,14 @@
 						</div>
 						<div>
 							<div class="flex justify-between items-baseline mb-1">
-								<label class="tp-label" for="hz-m-gamma">Brilho do Jogo (Gamma)</label>
+								<label class="tp-label" for="hz-m-gamma">{tr("Brilho do Jogo (Gamma)")}</label>
 								<span class="font-mono text-[12px] text-[#bef264] font-bold">{draft.horizonOptions?.gamma ?? 50}%</span>
 							</div>
 							<input id="hz-m-gamma" type="range" class="tp-range" min="0" max="100" step="1" bind:value={draft.horizonOptions!.gamma} />
 						</div>
 						<div>
 							<div class="flex justify-between items-baseline mb-1">
-								<label class="tp-label" for="hz-m-blur">Desfoque nos Menus (Blur)</label>
+								<label class="tp-label" for="hz-m-blur">{tr("Desfoque nos Menus (Blur)")}</label>
 								<span class="font-mono text-[12px] text-[#bef264] font-bold">{draft.horizonOptions?.menuBlur ?? 5}/10</span>
 							</div>
 							<input id="hz-m-blur" type="range" class="tp-range" min="0" max="10" step="1" bind:value={draft.horizonOptions!.menuBlur} />
@@ -795,21 +833,21 @@
 
 					<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
 						<div>
-							<label class="tp-label" for="hz-m-gui-scale">Escala da Interface (GUI)</label>
+							<label class="tp-label" for="hz-m-gui-scale">{tr("Escala da Interface (GUI)")}</label>
 							<select id="hz-m-gui-scale" class="tp-select" bind:value={draft.horizonOptions!.guiScale}>
-								<option value={0}>Automático (Auto)</option>
-								<option value={1}>1x (Pequeno)</option>
-								<option value={2}>2x (Normal)</option>
-								<option value={3}>3x (Grande)</option>
-								<option value={4}>4x (Muito Grande)</option>
+								<option value={0}>{tr("Automático (Auto)")}</option>
+								<option value={1}>{tr("1x (Pequeno)")}</option>
+								<option value={2}>{tr("2x (Normal)")}</option>
+								<option value={3}>{tr("3x (Grande)")}</option>
+								<option value={4}>{tr("4x (Muito Grande)")}</option>
 							</select>
 						</div>
 						<div>
-							<label class="tp-label" for="hz-m-atk-ind">Indicador de Ataque</label>
+							<label class="tp-label" for="hz-m-atk-ind">{tr("Indicador de Ataque")}</label>
 							<select id="hz-m-atk-ind" class="tp-select" bind:value={draft.horizonOptions!.attackIndicator}>
-								<option value="crosshair">Na Mira (Crosshair)</option>
-								<option value="hotbar">Na Barra de Ação (Hotbar)</option>
-								<option value="off">Desativado</option>
+								<option value="crosshair">{tr("Na Mira (Crosshair)")}</option>
+								<option value="hotbar">{tr("Na Barra de Ação (Hotbar)")}</option>
+								<option value="off">{tr("Desativado")}</option>
 							</select>
 						</div>
 					</div>
@@ -817,15 +855,15 @@
 					<div class="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-[#0d1612] p-3 rounded border border-[#1b2b22]">
 						<label class="flex items-center justify-between text-[12px] text-[#d1d5db] cursor-pointer">
 							<div>
-								<span>Balanço da Visão ao Andar</span>
-								<small class="block tp-muted text-[10.5px]">Movimento da câmera ao caminhar (View Bobbing).</small>
+								<span>{tr("Balanço da Visão ao Andar")}</span>
+								<small class="block tp-muted text-[10.5px]">{tr("Movimento da câmera ao caminhar (View Bobbing).")}</small>
 							</div>
 							<Toggle checked={draft.horizonOptions?.viewBobbing ?? true} onchange={(v) => (draft!.horizonOptions!.viewBobbing = v)} />
 						</label>
 						<label class="flex items-center justify-between text-[12px] text-[#d1d5db] cursor-pointer">
 							<div>
-								<span>Alto Contraste</span>
-								<small class="block tp-muted text-[10.5px]">Bordas destacadas e maior contraste nos menus.</small>
+								<span>{tr("Alto Contraste")}</span>
+								<small class="block tp-muted text-[10.5px]">{tr("Bordas destacadas e maior contraste nos menus.")}</small>
 							</div>
 							<Toggle checked={draft.horizonOptions?.highContrast ?? false} onchange={(v) => (draft!.horizonOptions!.highContrast = v)} />
 						</label>
@@ -838,22 +876,22 @@
 					<div class="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-[#0d1612] p-3 rounded border border-[#1b2b22]">
 						<label class="flex items-center justify-between text-[12px] text-[#d1d5db] cursor-pointer">
 							<div>
-								<span class="font-semibold text-white">Luz Dinâmica</span>
-								<small class="block tp-muted text-[10.5px]">Tochas e itens iluminam ao segurar.</small>
+								<span class="font-semibold text-white">{tr("Luz Dinâmica")}</span>
+								<small class="block tp-muted text-[10.5px]">{tr("Tochas e itens iluminam ao segurar.")}</small>
 							</div>
 							<Toggle checked={draft.horizonOptions?.dynamicLights ?? true} onchange={(v) => (draft!.horizonOptions!.dynamicLights = v)} />
 						</label>
 						<label class="flex items-center justify-between text-[12px] text-[#d1d5db] cursor-pointer">
 							<div>
-								<span class="font-semibold text-white">Brilho Máximo (Fullbright)</span>
-								<small class="block tp-muted text-[10.5px]">Visão noturna clara permanente.</small>
+								<span class="font-semibold text-white">{tr("Brilho Máximo (Fullbright)")}</span>
+								<small class="block tp-muted text-[10.5px]">{tr("Visão noturna clara permanente.")}</small>
 							</div>
 							<Toggle checked={draft.horizonOptions?.fullbright ?? false} onchange={(v) => (draft!.horizonOptions!.fullbright = v)} />
 						</label>
 						<label class="flex items-center justify-between text-[12px] text-[#d1d5db] cursor-pointer">
 							<div>
 								<span class="font-semibold text-white">Discord Rich Presence</span>
-								<small class="block tp-muted text-[10.5px]">Mostra o status de jogo no Discord.</small>
+								<small class="block tp-muted text-[10.5px]">{tr("Mostra o status de jogo no Discord.")}</small>
 							</div>
 							<Toggle checked={draft.horizonOptions?.discordPresence ?? true} onchange={(v) => (draft!.horizonOptions!.discordPresence = v)} />
 						</label>
@@ -863,15 +901,15 @@
 					<div class="p-3 bg-[#0d1612] rounded border border-[#1b2b22] space-y-3">
 						<div class="flex items-center justify-between">
 							<div>
-								<span class="font-semibold text-white text-[13px]">Zoom Suave Nativo</span>
-								<small class="block tp-muted text-[10.5px]">Aproximação de câmera cinematográfica estilo OptiFine.</small>
+								<span class="font-semibold text-white text-[13px]">{tr("Zoom Suave Nativo")}</span>
+								<small class="block tp-muted text-[10.5px]">{tr("Aproximação de câmera cinematográfica estilo OptiFine.")}</small>
 							</div>
 							<Toggle checked={draft.horizonOptions?.zoom ?? true} onchange={(v) => (draft!.horizonOptions!.zoom = v)} />
 						</div>
 						{#if draft.horizonOptions?.zoom}
 							<div class="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-[#1d2a23]">
 								<div>
-									<label class="tp-label" for="hz-m-zoom-key">Tecla de Zoom</label>
+									<label class="tp-label" for="hz-m-zoom-key">{tr("Tecla de Zoom")}</label>
 									<input id="hz-m-zoom-key" class="tp-input font-mono text-[11.5px]" bind:value={draft.horizonOptions!.zoomKey} placeholder="key.keyboard.z" />
 								</div>
 								<div>
@@ -880,7 +918,7 @@
 								</div>
 								<div class="flex flex-col justify-end gap-2">
 									<label class="flex items-center justify-between text-[11.5px] text-[#d1d5db] cursor-pointer">
-										<span>Transição Suave</span>
+										<span>{tr("Transição Suave")}</span>
 										<Toggle checked={draft.horizonOptions?.zoomSmooth ?? true} onchange={(v) => (draft!.horizonOptions!.zoomSmooth = v)} />
 									</label>
 								</div>
@@ -892,26 +930,26 @@
 					<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
 						<div class="p-3 bg-[#0d1612] rounded border border-[#1b2b22] space-y-3">
 							<div class="flex items-center justify-between">
-								<span class="font-semibold text-white text-[13px]">Minimapa no HUD</span>
+								<span class="font-semibold text-white text-[13px]">{tr("Minimapa no HUD")}</span>
 								<Toggle checked={draft.horizonOptions?.minimap ?? false} onchange={(v) => (draft!.horizonOptions!.minimap = v)} />
 							</div>
 							{#if draft.horizonOptions?.minimap}
 								<div class="grid grid-cols-2 gap-2 pt-2 border-t border-[#1d2a23]">
 									<div>
-										<label class="tp-label" for="hz-m-mm-pos">Posição</label>
+										<label class="tp-label" for="hz-m-mm-pos">{tr("Posição")}</label>
 										<select id="hz-m-mm-pos" class="tp-select !h-8 text-[11.5px]" bind:value={draft.horizonOptions!.minimapCorner}>
-											<option value="top_right">Superior Direito</option>
-											<option value="top_left">Superior Esquerdo</option>
-											<option value="bottom_right">Inferior Direito</option>
-											<option value="bottom_left">Inferior Esquerdo</option>
+											<option value="top_right">{tr("Superior Direito")}</option>
+											<option value="top_left">{tr("Superior Esquerdo")}</option>
+											<option value="bottom_right">{tr("Inferior Direito")}</option>
+											<option value="bottom_left">{tr("Inferior Esquerdo")}</option>
 										</select>
 									</div>
 									<div>
-										<label class="tp-label" for="hz-m-mm-sz">Tamanho</label>
+										<label class="tp-label" for="hz-m-mm-sz">{tr("Tamanho")}</label>
 										<select id="hz-m-mm-sz" class="tp-select !h-8 text-[11.5px]" bind:value={draft.horizonOptions!.minimapSize}>
-											<option value={64}>Pequeno (64px)</option>
-											<option value={96}>Médio (96px)</option>
-											<option value={128}>Grande (128px)</option>
+											<option value={64}>{tr("Pequeno (64px)")}</option>
+											<option value={96}>{tr("Médio (96px)")}</option>
+											<option value={128}>{tr("Grande (128px)")}</option>
 										</select>
 									</div>
 								</div>
@@ -921,22 +959,22 @@
 						<div class="p-3 bg-[#0d1612] rounded border border-[#1b2b22] space-y-3">
 							<div class="flex items-center justify-between">
 								<div>
-									<span class="font-semibold text-white text-[13px]">Contador de FPS</span>
-									<small class="block tp-muted text-[10.5px]">Taxa de quadros e frametime em tempo real.</small>
+									<span class="font-semibold text-white text-[13px]">{tr("Contador de FPS")}</span>
+									<small class="block tp-muted text-[10.5px]">{tr("Taxa de quadros e frametime em tempo real.")}</small>
 								</div>
 								<Toggle checked={draft.horizonOptions?.fps ?? true} onchange={(v) => (draft!.horizonOptions!.fps = v)} />
 							</div>
 							<div class="flex items-center justify-between pt-2 border-t border-[#1d2a23]">
 								<div>
 									<span class="font-semibold text-white text-[13px]">Keystrokes HUD</span>
-									<small class="block tp-muted text-[10.5px]">Sobreposição de teclas WASD e cliques.</small>
+									<small class="block tp-muted text-[10.5px]">{tr("Sobreposição de teclas WASD e cliques.")}</small>
 								</div>
 								<Toggle checked={draft.horizonOptions?.keystrokes ?? false} onchange={(v) => (draft!.horizonOptions!.keystrokes = v)} />
 							</div>
 							<div class="flex items-center justify-between pt-2 border-t border-[#1d2a23]">
 								<div>
 									<span class="font-semibold text-white text-[13px]">Mouse Tweaks</span>
-									<small class="block tp-muted text-[10.5px]">Arrasto e rolagem ágil em baús e inventário.</small>
+									<small class="block tp-muted text-[10.5px]">{tr("Arrasto e rolagem ágil em baús e inventário.")}</small>
 								</div>
 								<Toggle checked={draft.horizonOptions?.mouseTweaks ?? true} onchange={(v) => (draft!.horizonOptions!.mouseTweaks = v)} />
 							</div>
@@ -944,21 +982,21 @@
 					</div>
 
 					<!-- Controles do Jogador -->
-					<div class="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-[#0d1612] p-3 rounded border border-[#1b2b22]">
+					<div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 bg-[#0d1612] p-3 rounded border border-[#1b2b22]">
 						<label class="flex items-center justify-between text-[12px] text-[#d1d5db] cursor-pointer">
-							<span>Pulo Automático</span>
+							<span>{tr("Pulo Automático")}</span>
 							<Toggle checked={draft.horizonOptions?.autoJump ?? false} onchange={(v) => (draft!.horizonOptions!.autoJump = v)} />
 						</label>
 						<label class="flex items-center justify-between text-[12px] text-[#d1d5db] cursor-pointer">
-							<span>Alternar Agachamento</span>
+							<span>{tr("Alternar Agachamento")}</span>
 							<Toggle checked={draft.horizonOptions?.toggleCrouch ?? false} onchange={(v) => (draft!.horizonOptions!.toggleCrouch = v)} />
 						</label>
 						<label class="flex items-center justify-between text-[12px] text-[#d1d5db] cursor-pointer">
-							<span>Alternar Corrida</span>
+							<span>{tr("Alternar Corrida")}</span>
 							<Toggle checked={draft.horizonOptions?.toggleSprint ?? false} onchange={(v) => (draft!.horizonOptions!.toggleSprint = v)} />
 						</label>
 						<label class="flex items-center justify-between text-[12px] text-[#d1d5db] cursor-pointer">
-							<span>Reconectar Automático</span>
+							<span>{tr("Reconectar Automático")}</span>
 							<Toggle checked={draft.horizonOptions?.autoReconnect ?? false} onchange={(v) => (draft!.horizonOptions!.autoReconnect = v)} />
 						</label>
 					</div>
@@ -973,7 +1011,7 @@
 								<Sun size={18} class="text-[#f59e0b]" />
 								Ativar Saída HDR (High Dynamic Range)
 							</span>
-							<small class="block tp-muted text-[11px] mt-0.5">Requer monitor compatível com HDR10 ou scRGB ativado no Windows.</small>
+							<small class="block tp-muted text-[11px] mt-0.5">{tr("Requer monitor compatível com HDR10 ou scRGB ativado no Windows.")}</small>
 						</div>
 						<Toggle checked={draft.horizonOptions?.hdr ?? false} onchange={(v) => (draft!.horizonOptions!.hdr = v)} />
 					</div>
@@ -982,14 +1020,14 @@
 						<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
 							<div>
 								<div class="flex justify-between items-baseline mb-1">
-									<label class="tp-label" for="hz-m-hdr-pw">Branco de Referência (Paper White)</label>
+									<label class="tp-label" for="hz-m-hdr-pw">{tr("Branco de Referência (Paper White)")}</label>
 									<span class="font-mono text-[12px] text-[#bef264] font-bold">{draft.horizonOptions?.hdrPaperWhite ?? 203} nits</span>
 								</div>
 								<input id="hz-m-hdr-pw" type="range" class="tp-range" min="80" max="500" step="10" bind:value={draft.horizonOptions!.hdrPaperWhite} />
 							</div>
 							<div>
 								<div class="flex justify-between items-baseline mb-1">
-									<label class="tp-label" for="hz-m-hdr-pk">Pico de Brilho dos Destaques (Peak)</label>
+									<label class="tp-label" for="hz-m-hdr-pk">{tr("Pico de Brilho dos Destaques (Peak)")}</label>
 									<span class="font-mono text-[12px] text-[#bef264] font-bold">{draft.horizonOptions?.hdrPeak ?? 1000} nits</span>
 								</div>
 								<input id="hz-m-hdr-pk" type="range" class="tp-range" min="400" max="4000" step="50" bind:value={draft.horizonOptions!.hdrPeak} />
@@ -1006,17 +1044,17 @@
 	{/if}
 
 	{#snippet footer()}
-		<div class="flex items-center justify-between w-full">
+		<div class="flex flex-wrap items-center justify-between gap-3 w-full">
 			<div>
 				{#if onopenmods && draft}
-					<PixelButton variant="ghost" icon={Package} onclick={() => { open = false; onopenmods?.(draft!); }}>
-						Gerenciar Mods ({draft.loader === 'horizon-rust' ? '77 Mods Horizon' : 'Mods'})
+					<PixelButton variant="stone" icon={Package} onclick={() => { pendingMods = true; configModal?.close(); }}>
+						MODS
 					</PixelButton>
 				{/if}
 			</div>
-			<div class="flex items-center gap-2">
-				<PixelButton variant="ghost" onclick={() => (open = false)}>Cancelar</PixelButton>
-				<PixelButton variant="emerald" icon={Save} onclick={save}>Salvar Alterações</PixelButton>
+			<div class="flex flex-wrap items-center gap-2">
+				<PixelButton variant="ghost" onclick={() => configModal?.close()}>{tr("Cancelar")}</PixelButton>
+				<PixelButton variant="emerald" icon={Save} loading={saving} onclick={() => save().catch(() => {})}>{tr("Salvar Alterações")}</PixelButton>
 			</div>
 		</div>
 	{/snippet}

@@ -15,6 +15,8 @@
 	import { formatPlaytime, LOADER_LABEL, timeAgo } from '$lib/util/format';
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
+	import { flip } from 'svelte/animate';
+	import { tick } from 'svelte';
 	import {
 		Compass,
 		Copy,
@@ -152,6 +154,20 @@
 		}
 	}
 
+	/** Dá play, sobe o card para o topo (vira o mais recente) e rola até ele para mostrar o progresso. */
+	async function playAndReveal(inst: Instance) {
+		const run = app.play(inst);
+		await tick();
+		const card = document.querySelector<HTMLElement>(`[data-instance="${inst.id}"]`);
+		let scroller: HTMLElement | null = card?.parentElement ?? null;
+		while (scroller && !(scroller.scrollHeight > scroller.clientHeight && /(auto|scroll)/.test(getComputedStyle(scroller).overflowY))) {
+			scroller = scroller.parentElement;
+		}
+		const smooth = !matchMedia('(prefers-reduced-motion: reduce)').matches;
+		(scroller ?? document.scrollingElement)?.scrollTo({ top: 0, behavior: smooth ? 'smooth' : 'auto' });
+		await run.catch(toasts.err);
+	}
+
 	const rustCount = $derived(app.instances.filter((i) => i.loader === 'horizon-rust').length);
 	const javaCount = $derived(app.instances.filter((i) => i.loader !== 'horizon-rust').length);
 	const runningCount = $derived(Object.keys(app.running).length);
@@ -257,6 +273,8 @@
 				{@const isRust = i.loader === 'horizon-rust'}
 
 				<div
+					data-instance={i.id}
+					animate:flip={{ duration: 380 }}
 					class="flex flex-col justify-between p-4.5 rounded-lg bg-[#0d1612] border-2 transition-all shadow-lg hover:border-[#10b981]/70"
 					class:border-[#10b981]={isRunning}
 					class:border-[#1b2b22]={!isRunning}
@@ -332,7 +350,7 @@
 									icon={Play}
 									class="justify-center w-full"
 									loading={task?.busy}
-									onclick={() => app.play(i).catch(toasts.err)}
+									onclick={() => playAndReveal(i)}
 								>
 									Jogar
 								</PixelButton>

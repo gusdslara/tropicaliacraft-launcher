@@ -5,7 +5,7 @@ import type { ServerEngine } from '$lib/types';
 export interface EngineInfo {
 	id: ServerEngine;
 	name: string;
-	category: 'hybrid' | 'plugins' | 'mods';
+	category: 'vanilla' | 'plugins' | 'mods' | 'hybrid';
 	tagline: string;
 	/** pastas que esse motor usa */
 	accepts: Array<'mod' | 'plugin'>;
@@ -15,9 +15,76 @@ export interface EngineInfo {
 	bestEffort?: boolean;
 	site: string;
 	flavors?: Array<{ id: string; label: string; modLoader: 'forge' | 'neoforge' | 'fabric' }>;
+	/** baixa um instalador e roda `--installServer` (Forge/NeoForge) em vez de um server.jar pronto */
+	installer?: boolean;
+	/** destaque "recomendado" no card */
+	recommended?: boolean;
 }
 
 export const ENGINES: EngineInfo[] = [
+	{
+		id: 'vanilla',
+		name: 'Vanilla',
+		category: 'vanilla',
+		tagline: 'O servidor oficial da Mojang, sem mods nem plugins.',
+		accepts: [],
+		site: 'https://www.minecraft.net/download/server'
+	},
+	{
+		id: 'paper',
+		name: 'Paper',
+		category: 'plugins',
+		tagline: 'O padrão para plugins, focado em desempenho.',
+		accepts: ['plugin'],
+		recommended: true,
+		site: 'https://papermc.io'
+	},
+	{
+		id: 'purpur',
+		name: 'Purpur',
+		category: 'plugins',
+		tagline: 'Fork do Paper com dezenas de opções extras de gameplay.',
+		accepts: ['plugin'],
+		site: 'https://purpurmc.org'
+	},
+	{
+		id: 'folia',
+		name: 'Folia',
+		category: 'plugins',
+		tagline: 'Paper multithread por regiões, para muitos jogadores.',
+		accepts: ['plugin'],
+		site: 'https://papermc.io/software/folia'
+	},
+	{
+		id: 'fabric',
+		name: 'Fabric',
+		category: 'mods',
+		tagline: 'Leve e rápido: mods de performance e conteúdo Fabric.',
+		accepts: ['mod'],
+		modLoader: 'fabric',
+		recommended: true,
+		site: 'https://fabricmc.net'
+	},
+	{
+		id: 'forge',
+		name: 'Forge',
+		category: 'mods',
+		tagline: 'O clássico dos modpacks grandes (1.7.10 até hoje).',
+		accepts: ['mod'],
+		modLoader: 'forge',
+		installer: true,
+		site: 'https://files.minecraftforge.net'
+	},
+	{
+		id: 'neoforge',
+		name: 'NeoForge',
+		category: 'mods',
+		tagline: 'Sucessor do Forge (1.20.2+): Create, Mekanism, ATM…',
+		accepts: ['mod'],
+		modLoader: 'neoforge',
+		installer: true,
+		site: 'https://neoforged.net'
+	},
 	{
 		id: 'magma',
 		name: 'Magma',
@@ -50,31 +117,6 @@ export const ENGINES: EngineInfo[] = [
 		modLoader: 'forge',
 		bestEffort: true,
 		site: 'https://mohistmc.com'
-	},
-	{
-		id: 'paper',
-		name: 'Paper',
-		category: 'plugins',
-		tagline: 'O padrão para plugins, focado em desempenho.',
-		accepts: ['plugin'],
-		site: 'https://papermc.io'
-	},
-	{
-		id: 'purpur',
-		name: 'Purpur',
-		category: 'plugins',
-		tagline: 'Fork do Paper com dezenas de opções extras de gameplay.',
-		accepts: ['plugin'],
-		site: 'https://purpurmc.org'
-	},
-	{
-		id: 'fabric',
-		name: 'Fabric Server',
-		category: 'mods',
-		tagline: 'Servidor leve para mods Fabric.',
-		accepts: ['mod'],
-		modLoader: 'fabric',
-		site: 'https://fabricmc.net'
 	}
 ];
 
@@ -117,12 +159,62 @@ function sortVersions(list: string[]) {
 	return [...new Set(list)].sort((a, b) => key(b).localeCompare(key(a)));
 }
 
+interface MojangManifest {
+	versions: Array<{ id: string; type: string; url: string }>;
+}
+const mojangManifest = () => getJson<MojangManifest>('https://piston-meta.mojang.com/mc/game/version_manifest_v2.json');
+
+/** promoções do Forge: "1.20.1-recommended" → "47.4.0" */
+const forgePromos = () =>
+	getJson<{ promos: Record<string, string> }>('https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json').then(
+		(p) => p.promos
+	);
+
+/** NeoForge 21.1.77 → Minecraft 1.21.1; 20.4.x → 1.20.4; 21.0.x → 1.21; 26.1.0.x → 26.1 */
+export function neoforgeMc(v: string): string {
+	const [major, minor, patch] = v.split(/[.-]/);
+	if (Number(major) >= 26) return patch && patch !== '0' ? `${major}.${minor}.${patch}` : `${major}.${minor}`;
+	return minor === '0' ? `1.${major}` : `1.${major}.${minor}`;
+}
+
+const neoforgeVersions = () =>
+	getJson<{ versions: string[] }>('https://maven.neoforged.net/api/maven/versions/releases/net/neoforged/neoforge').then((r) =>
+		r.versions.filter((v) => !v.startsWith('0.'))
+	);
+
+async function fillVersions(project: 'paper' | 'folia') {
+	const p = await getJson<{ versions: Record<string, string[]> }>(`https://fill.papermc.io/v3/projects/${project}`);
+	return sortVersions(Object.values(p.versions).flat().filter((v) => !/pre|rc/.test(v)));
+}
+
+async function fillJar(project: 'paper' | 'folia', mc: string): Promise<ResolvedJar | undefined> {
+	const builds = await getJson<Array<{ id: number; channel: string; downloads: Record<string, { name: string; url: string }> }>>(
+		`https://fill.papermc.io/v3/projects/${project}/versions/${mc}/builds`
+	);
+	const b = builds.find((x) => x.channel === 'STABLE') ?? builds[0];
+	const dl = b?.downloads['server:default'];
+	return dl ? { url: dl.url, label: `${project === 'paper' ? 'Paper' : 'Folia'} ${mc} #${b.id}` } : undefined;
+}
+
 export async function engineVersions(id: ServerEngine, flavor?: string): Promise<string[]> {
 	switch (id) {
+		case 'vanilla': {
+			const m = await mojangManifest();
+			return m.versions.filter((v) => v.type === 'release').map((v) => v.id);
+		}
+		case 'folia':
+			return fillVersions('folia');
+		case 'forge': {
+			const promos = await forgePromos();
+			return sortVersions(Object.keys(promos).map((k) => k.replace(/-(latest|recommended)$/, '')));
+		}
+		case 'neoforge': {
+			const list = await neoforgeVersions();
+			return sortVersions(list.filter((v) => !/beta|alpha/.test(v)).map(neoforgeMc));
+		}
 		case 'paper': {
 			try {
-				const p = await getJson<{ versions: Record<string, string[]> }>('https://fill.papermc.io/v3/projects/paper');
-				return sortVersions(Object.values(p.versions).flat().filter((v) => !/pre|rc/.test(v)));
+				return await fillVersions('paper');
 			} catch {
 				const p = await getJson<{ versions: string[] }>('https://api.papermc.io/v2/projects/paper');
 				return sortVersions(p.versions.filter((v) => !/pre|rc/.test(v)));
@@ -149,14 +241,44 @@ export async function engineVersions(id: ServerEngine, flavor?: string): Promise
 
 export async function resolveJar(id: ServerEngine, mc: string, flavor?: string): Promise<ResolvedJar> {
 	switch (id) {
+		case 'vanilla': {
+			const m = await mojangManifest();
+			const v = m.versions.find((x) => x.id === mc);
+			if (!v) throw new Error(`Versão ${mc} não encontrada na Mojang`);
+			const json = await getJson<{ downloads?: { server?: { url: string; sha1: string } } }>(v.url);
+			const server = json.downloads?.server;
+			if (!server) throw new Error(`A Mojang não publica servidor para ${mc}`);
+			return { url: server.url, sha1: server.sha1, label: `Vanilla ${mc}` };
+		}
+		case 'folia': {
+			const jar = await fillJar('folia', mc);
+			if (!jar) throw new Error(`Nenhum build estável do Folia para ${mc}`);
+			return jar;
+		}
+		case 'forge': {
+			const promos = await forgePromos();
+			const v = promos[`${mc}-recommended`] ?? promos[`${mc}-latest`];
+			if (!v) throw new Error(`Nenhum Forge para ${mc}`);
+			const full = `${mc}-${v}`;
+			return {
+				url: `https://maven.minecraftforge.net/net/minecraftforge/forge/${full}/forge-${full}-installer.jar`,
+				label: `Forge ${mc} · ${v}`
+			};
+		}
+		case 'neoforge': {
+			const list = (await neoforgeVersions()).filter((v) => neoforgeMc(v) === mc);
+			const stable = list.filter((v) => !/beta|alpha/.test(v));
+			const v = (stable.length ? stable : list).at(-1);
+			if (!v) throw new Error(`Nenhum NeoForge para ${mc}`);
+			return {
+				url: `https://maven.neoforged.net/releases/net/neoforged/neoforge/${v}/neoforge-${v}-installer.jar`,
+				label: `NeoForge ${mc} · ${v}`
+			};
+		}
 		case 'paper': {
 			try {
-				const builds = await getJson<
-					Array<{ id: number; channel: string; downloads: Record<string, { name: string; url: string }> }>
-				>(`https://fill.papermc.io/v3/projects/paper/versions/${mc}/builds`);
-				const b = builds.find((x) => x.channel === 'STABLE') ?? builds[0];
-				const dl = b?.downloads['server:default'];
-				if (dl) return { url: dl.url, label: `Paper ${mc} #${b.id}` };
+				const jar = await fillJar('paper', mc);
+				if (jar) return jar;
 			} catch {
 				/* cai para a API v2 */
 			}
@@ -202,46 +324,124 @@ export async function resolveJar(id: ServerEngine, mc: string, flavor?: string):
 	}
 }
 
-/** Campos visuais do server.properties. */
-export const PROPERTY_FIELDS: Array<
-	| { key: string; label: string; type: 'text' | 'number'; help?: string; min?: number; max?: number }
-	| { key: string; label: string; type: 'bool'; help?: string }
-	| { key: string; label: string; type: 'select'; options: Array<[string, string]>; help?: string }
-> = [
-	{ key: 'motd', label: 'Mensagem do dia (MOTD)', type: 'text', help: 'Use § para cores: §a verde, §6 dourado, §l negrito' },
-	{ key: 'server-port', label: 'Porta', type: 'number', min: 1024, max: 65535 },
-	{ key: 'max-players', label: 'Máximo de jogadores', type: 'number', min: 1, max: 1000 },
+export type PropertyField =
+	| { key: string; label: string; type: 'text' | 'number'; help?: string; min?: number; max?: number; warn?: (v: string) => string | null }
+	| { key: string; label: string; type: 'bool'; help?: string; warn?: (v: string) => string | null }
+	| { key: string; label: string; type: 'select'; options: Array<[string, string]>; help?: string; warn?: (v: string) => string | null };
+
+/** server.properties completo em grupos (os mesmos campos do painel do TropicaliaCraft oficial). */
+export const PROPERTY_GROUPS: Array<{ id: string; title: string; fields: PropertyField[] }> = [
 	{
-		key: 'gamemode',
-		label: 'Modo de jogo',
-		type: 'select',
-		options: [
-			['survival', 'Sobrevivência'],
-			['creative', 'Criativo'],
-			['adventure', 'Aventura'],
-			['spectator', 'Espectador']
+		id: 'access',
+		title: 'Acesso e segurança',
+		fields: [
+			{
+				key: 'online-mode',
+				label: 'Online mode (só contas originais)',
+				type: 'bool',
+				help: 'Desligue para jogar em LAN com contas offline, ou atrás de um proxy.',
+				warn: (v) => (v === 'false' ? 'Desligado: qualquer um entra com qualquer nick. Ative a whitelist se o servidor for público.' : null)
+			},
+			{ key: 'white-list', label: 'Whitelist ativa', type: 'bool', help: 'Os nomes ficam na aba Whitelist & OPs.' },
+			{ key: 'enforce-whitelist', label: 'Expulsar quem sai da whitelist', type: 'bool', help: 'Quem já está online e não está na lista é expulso ao recarregar.' },
+			{ key: 'enforce-secure-profile', label: 'Exigir chat assinado', type: 'bool', help: 'Desligue com Geyser/Floodgate ou contas offline.' },
+			{ key: 'prevent-proxy-connections', label: 'Bloquear VPN/proxy', type: 'bool' },
+			{ key: 'max-players', label: 'Máximo de jogadores', type: 'number', min: 1, max: 10000 },
+			{ key: 'server-port', label: 'Porta', type: 'number', min: 1024, max: 65535, help: 'Padrão 25565.' },
+			{ key: 'server-ip', label: 'IP de bind (vazio = todos)', type: 'text' },
+			{ key: 'hide-online-players', label: 'Esconder jogadores no ping', type: 'bool' },
+			{ key: 'enable-status', label: 'Aparecer na lista de servidores', type: 'bool' },
+			{
+				key: 'op-permission-level',
+				label: 'Poder dos OPs',
+				type: 'select',
+				options: [
+					['1', '1 · ignora proteção do spawn'],
+					['2', '2 · comandos de jogo'],
+					['3', '3 · kick e ban'],
+					['4', '4 · tudo (stop, save)']
+				]
+			}
 		]
 	},
 	{
-		key: 'difficulty',
-		label: 'Dificuldade',
-		type: 'select',
-		options: [
-			['peaceful', 'Pacífico'],
-			['easy', 'Fácil'],
-			['normal', 'Normal'],
-			['hard', 'Difícil']
+		id: 'game',
+		title: 'Jogo',
+		fields: [
+			{ key: 'gamemode', label: 'Modo de jogo padrão', type: 'select', options: [['survival', 'Sobrevivência'], ['creative', 'Criativo'], ['adventure', 'Aventura'], ['spectator', 'Espectador']] },
+			{ key: 'force-gamemode', label: 'Forçar modo ao entrar', type: 'bool' },
+			{ key: 'difficulty', label: 'Dificuldade', type: 'select', options: [['peaceful', 'Pacífico'], ['easy', 'Fácil'], ['normal', 'Normal'], ['hard', 'Difícil']] },
+			{ key: 'hardcore', label: 'Hardcore', type: 'bool', help: 'Morreu, virou espectador.' },
+			{ key: 'pvp', label: 'PvP', type: 'bool' },
+			{ key: 'allow-flight', label: 'Permitir voo', type: 'bool', help: 'Evita kick por "flying" em modpacks com jetpack.' },
+			{ key: 'allow-nether', label: 'Nether', type: 'bool' },
+			{ key: 'spawn-monsters', label: 'Monstros', type: 'bool' },
+			{ key: 'spawn-protection', label: 'Proteção do spawn (blocos)', type: 'number', min: 0, max: 1000, help: '0 desliga; OPs ignoram.' },
+			{ key: 'enable-command-block', label: 'Command blocks', type: 'bool' }
 		]
 	},
-	{ key: 'online-mode', label: 'Modo online (só contas originais)', type: 'bool', help: 'Desligue para aceitar contas offline/LAN' },
-	{ key: 'white-list', label: 'Whitelist', type: 'bool' },
-	{ key: 'pvp', label: 'PvP', type: 'bool' },
-	{ key: 'allow-flight', label: 'Permitir voo', type: 'bool', help: 'Necessário em muitos modpacks (jetpacks, etc.)' },
-	{ key: 'view-distance', label: 'Distância de visão', type: 'number', min: 2, max: 32 },
-	{ key: 'simulation-distance', label: 'Distância de simulação', type: 'number', min: 2, max: 32 },
-	{ key: 'spawn-protection', label: 'Proteção do spawn (blocos)', type: 'number', min: 0, max: 64 },
-	{ key: 'level-seed', label: 'Seed do mundo', type: 'text', help: 'Só vale antes de gerar o mundo' }
+	{
+		id: 'world',
+		title: 'Mundo e desempenho',
+		fields: [
+			{ key: 'level-name', label: 'Pasta do mundo', type: 'text' },
+			{ key: 'level-seed', label: 'Seed', type: 'text', help: 'Só vale para mundo novo.' },
+			{
+				key: 'level-type',
+				label: 'Tipo de mundo',
+				type: 'select',
+				options: [['minecraft:normal', 'Normal'], ['minecraft:flat', 'Plano'], ['minecraft:large_biomes', 'Biomas grandes'], ['minecraft:amplified', 'Amplificado']],
+				help: 'Só vale para mundo novo.'
+			},
+			{ key: 'generate-structures', label: 'Gerar estruturas', type: 'bool' },
+			{ key: 'view-distance', label: 'Distância de visão (chunks)', type: 'number', min: 2, max: 32, help: '6–10 é o ideal num PC comum.' },
+			{ key: 'simulation-distance', label: 'Distância de simulação (chunks)', type: 'number', min: 2, max: 32 },
+			{ key: 'max-world-size', label: 'Tamanho máximo do mundo (raio)', type: 'number', min: 1, max: 29999984 },
+			{ key: 'player-idle-timeout', label: 'Expulsar AFK após (min, 0 = nunca)', type: 'number', min: 0, max: 10000 },
+			{ key: 'pause-when-empty-seconds', label: 'Pausar vazio após (s, -1 = nunca)', type: 'number', min: -1, max: 100000 },
+			{ key: 'network-compression-threshold', label: 'Compressão de rede (bytes)', type: 'number', min: -1, max: 65535 },
+			{ key: 'require-resource-pack', label: 'Exigir resource pack', type: 'bool' },
+			{ key: 'resource-pack', label: 'URL do resource pack', type: 'text' }
+		]
+	}
 ];
+
+/** Lista plana (compatibilidade). */
+export const PROPERTY_FIELDS: PropertyField[] = PROPERTY_GROUPS.flatMap((g) => g.fields);
+
+/** Padrões do Minecraft para chaves ausentes do arquivo (só exibição). */
+export const MINECRAFT_DEFAULTS: Record<string, string> = {
+	'online-mode': 'true',
+	'white-list': 'false',
+	'enforce-whitelist': 'false',
+	'enforce-secure-profile': 'true',
+	'prevent-proxy-connections': 'false',
+	'hide-online-players': 'false',
+	'enable-status': 'true',
+	'op-permission-level': '4',
+	'max-players': '20',
+	'server-port': '25565',
+	gamemode: 'survival',
+	'force-gamemode': 'false',
+	difficulty: 'easy',
+	hardcore: 'false',
+	pvp: 'true',
+	'allow-flight': 'false',
+	'allow-nether': 'true',
+	'spawn-monsters': 'true',
+	'spawn-protection': '16',
+	'enable-command-block': 'false',
+	'level-name': 'world',
+	'level-type': 'minecraft:normal',
+	'generate-structures': 'true',
+	'view-distance': '10',
+	'simulation-distance': '10',
+	'max-world-size': '29999984',
+	'player-idle-timeout': '0',
+	'pause-when-empty-seconds': '60',
+	'network-compression-threshold': '256',
+	'require-resource-pack': 'false'
+};
 
 export const DEFAULT_PROPERTIES: Record<string, string> = {
 	motd: '§aServidor §6Tropicalia §fdo launcher',

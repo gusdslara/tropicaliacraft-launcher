@@ -1,11 +1,15 @@
 //! Tropicalia Universal Launcher — backend Tauri v2.
 
 mod content;
+mod controls;
+mod curseforge;
 mod download;
 mod game;
 mod java;
+mod net;
 mod paths;
 mod server;
+mod servers_dat;
 mod system;
 mod tray;
 mod updater;
@@ -52,6 +56,10 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            curseforge::curseforge_get,
+            controls::controls_apply,
+            controls::controls_orientation,
+            controls::controls_transfer,
             game::game_launch,
             game::game_kill,
             game::game_running,
@@ -62,6 +70,7 @@ pub fn run() {
             content::content_toggle,
             content::content_delete,
             content::horizon_mods_state_get,
+            content::horizon_native_mods,
             content::horizon_mods_state_set,
             content::horizon_mods_state_set_bulk,
             content::content_install,
@@ -70,17 +79,28 @@ pub fn run() {
             content::instance_export,
             content::mrpack_install,
             content::path_of,
+            content::skin_save,
+            content::skin_export,
+            content::skin_use,
+            content::skin_use_clear,
+            content::skin_active,
             server::server_install,
             server::server_installed,
             server::server_set_eula,
             server::server_read_properties,
             server::server_write_properties,
+            server::server_read_list,
+            server::server_write_list,
+            server::server_read_icon,
+            server::server_write_icon,
             server::server_start,
             server::server_command,
             server::server_stop,
             server::server_running,
             server::server_delete,
             server::local_ips,
+            net::server_ping,
+            net::lan_scan,
             system::system_info,
             system::secret_set,
             system::secret_get,

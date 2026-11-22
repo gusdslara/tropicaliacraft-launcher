@@ -74,17 +74,18 @@ async function postJson<T>(url: string, data: unknown, headers: Record<string, s
 	return body as T;
 }
 
+export const DEFAULT_MS_CLIENT_ID = 'c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb';
+
 // ------------------------------------------------------------------ passo 1-3: Microsoft
 
-export async function requestDeviceCode(clientId: string): Promise<DeviceCode> {
-	if (!clientId) {
-		throw new AuthError('Configure o Client ID do Azure em Ajustes → Conta Microsoft antes de entrar.', 'no_client_id');
-	}
-	return postForm<DeviceCode>(`${MS}/devicecode`, { client_id: clientId, scope: SCOPE });
+export async function requestDeviceCode(clientId?: string): Promise<DeviceCode> {
+	const cid = (clientId || '').trim() || DEFAULT_MS_CLIENT_ID;
+	return postForm<DeviceCode>(`${MS}/devicecode`, { client_id: cid, scope: SCOPE });
 }
 
 /** Faz polling até o usuário aprovar o código (ou expirar/cancelar). */
-export async function pollDeviceCode(clientId: string, code: DeviceCode, signal: AbortSignal): Promise<MsToken> {
+export async function pollDeviceCode(clientId: string | undefined, code: DeviceCode, signal: AbortSignal): Promise<MsToken> {
+	const cid = (clientId || '').trim() || DEFAULT_MS_CLIENT_ID;
 	let interval = Math.max(code.interval, 2) * 1000;
 	const deadline = Date.now() + code.expires_in * 1000;
 	while (Date.now() < deadline) {
@@ -92,7 +93,7 @@ export async function pollDeviceCode(clientId: string, code: DeviceCode, signal:
 		try {
 			return await postForm<MsToken>(`${MS}/token`, {
 				grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-				client_id: clientId,
+				client_id: cid,
 				device_code: code.device_code
 			});
 		} catch (e) {
@@ -110,10 +111,11 @@ export async function pollDeviceCode(clientId: string, code: DeviceCode, signal:
 	throw new AuthError('O código expirou. Gere um novo e tente de novo.', 'expired_token');
 }
 
-export async function refreshMicrosoft(clientId: string, refreshToken: string): Promise<MsToken> {
+export async function refreshMicrosoft(clientId: string | undefined, refreshToken: string): Promise<MsToken> {
+	const cid = (clientId || '').trim() || DEFAULT_MS_CLIENT_ID;
 	return postForm<MsToken>(`${MS}/token`, {
 		grant_type: 'refresh_token',
-		client_id: clientId,
+		client_id: cid,
 		refresh_token: refreshToken,
 		scope: SCOPE
 	});

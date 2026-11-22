@@ -1,5 +1,6 @@
 <!-- Criar instância: nome, ícone, motor/modloader, RAM, parâmetros e seleção de mods (.hmod Horizon e .jar Java) -->
 <script lang="ts">
+    import { tr } from '$lib/ui-text';
 	import Modal from './Modal.svelte';
 	import PixelButton from './PixelButton.svelte';
 	import TabSelector from './TabSelector.svelte';
@@ -19,41 +20,53 @@
 		HORIZON_CATEGORIES,
 		OFFICIAL_HORIZON_MODS,
 		setHorizonModsBulk,
+        ensureHorizonModsInstalled,
+        supportedHorizonNativeMods,
 		type HorizonModCategory,
 		type OfficialHorizonMod,
 		seedHorizonInstanceMods
 	} from '$lib/services/horizon-mods';
 	import { call, isTauri } from '$lib/platform';
 	import type { BlockIcon as BlockIconT, ContentKind, Instance, ModLoader } from '$lib/types';
-	import { BLOCK_ICONS, errorMessage, formatBytes, LOADER_LABEL } from '$lib/util/format';
+	import { BLOCK_ICONS, DEFAULT_LOADER_ICON, errorMessage, formatBytes, LOADER_LABEL } from '$lib/util/format';
 	import { Check, Cpu, HardDrive, Package, Puzzle, Sparkles, Terminal } from 'lucide-svelte';
 
 	let { open = $bindable(false), oncreated }: { open: boolean; oncreated?: (i: Instance) => void } = $props();
 
 	let activeModalTab = $state<'general' | 'mods'>('general');
+    let createModal: { close(): void } | undefined;
 	let contentTabKind = $state<ContentKind>('mod');
 	let selectedJavaItems = $state<SearchHit[]>([]);
 
-	// Estado dos mods Horizon selecionados para a nova instância
-	let selectedHorizonModIds = $state<string[]>(
-		OFFICIAL_HORIZON_MODS.filter((m) => m.defaultEnabled).map((m) => m.id)
+	// Rust usa o mesmo seletor do Java (ContentPickerInline); a seleção também é uma lista de SearchHit.
+	function hitFromMod(m: OfficialHorizonMod): SearchHit {
+		return {
+			project_id: m.id, slug: m.id, title: m.name, description: m.summary, icon_url: m.iconUrl ?? null,
+			author: m.author, downloads: m.downloads, follows: 0, categories: ['Rust', 'Horizon 26.3'],
+			display_categories: ['Rust', 'Horizon 26.3'], versions: [m.version], project_type: 'mod',
+			client_side: 'required', server_side: 'optional', date_modified: ''
+		} as SearchHit;
+	}
+	let nativeModIds = $state(new Set<string>());
+	let nativeCapabilitiesReady = $state(!isTauri);
+	function modAvailable(mod: OfficialHorizonMod) { return !mod.filename.endsWith('.hnmod') || nativeModIds.has(mod.id); }
+	let selectedHorizon = $state<SearchHit[]>(
+		OFFICIAL_HORIZON_MODS.filter((m) => m.defaultEnabled && !m.filename.endsWith('.hnmod')).map(hitFromMod)
 	);
-	let horizonSearch = $state('');
-	let horizonCategory = $state<HorizonModCategory>('all');
-
-	const filteredHorizonMods = $derived(
-		OFFICIAL_HORIZON_MODS.filter((m) => {
-			if (horizonCategory !== 'all' && m.category !== horizonCategory) return false;
-			if (!horizonSearch) return true;
-			const q = horizonSearch.toLowerCase().trim();
-			return (
-				m.name.toLowerCase().includes(q) ||
-				m.id.toLowerCase().includes(q) ||
-				m.summary.toLowerCase().includes(q) ||
-				m.author.toLowerCase().includes(q)
-			);
-		})
-	);
+	const selectedHorizonModIds = $derived(selectedHorizon.map((h) => h.project_id));
+	$effect(() => {
+		if (!open || loader !== 'horizon-rust') return;
+		nativeCapabilitiesReady = false;
+		supportedHorizonNativeMods({ id: app.lastInstance?.id ?? 'new-instance' })
+			.then((ids) => {
+				nativeModIds = ids;
+				// padrões Tropicalia que o motor consegue rodar já vêm marcados
+				const have = new Set(selectedHorizon.map((h) => h.project_id));
+				const defaults = OFFICIAL_HORIZON_MODS.filter((m) => m.defaultEnabled && modAvailable(m) && !have.has(m.id));
+				selectedHorizon = [...selectedHorizon, ...defaults.map(hitFromMod)];
+				nativeCapabilitiesReady = true;
+			}).catch((e) => { nativeCapabilitiesReady = true; toasts.err(e); });
+	});
 
 	let name = $state('');
 	let icon = $state<BlockIconT>('creeper');
@@ -75,14 +88,28 @@
 	const visibleVersions = $derived(versions.filter((v) => v.type === 'release' || (snapshots && v.type === 'snapshot')));
 	const maxRam = $derived(Math.max(2048, app.system.totalMemoryMb - 1024));
 
+	function getDefaultName(l: ModLoader): string {
+		const base = `Tropicalia (${LOADER_LABEL[l]})`;
+		if (!app.instances.some((i) => i.name.toLowerCase() === base.toLowerCase())) {
+			return base;
+		}
+		let num = 2;
+		while (app.instances.some((i) => i.name.toLowerCase() === `${base} ${num}`.toLowerCase())) {
+			num++;
+		}
+		return `${base} ${num}`;
+	}
+
 	const canCreate = $derived(
-		name.trim().length > 0 &&
 		(loader === 'horizon-rust' ? true : gameVersion && (loader === 'vanilla' || loaderVersion)) &&
-		loadersState !== 'loading'
+		loadersState !== 'loading' && (loader !== 'horizon-rust' || nativeCapabilitiesReady)
 	);
 
 	$effect(() => {
 		if (!open) return;
+		if (!name || name.trim() === '') {
+			name = getDefaultName(loader);
+		}
 		if (loader === 'horizon-rust') {
 			gameVersion = '26.3';
 			memory = app.settings.defaultMemoryMb || 4096;
@@ -121,22 +148,16 @@
 			.catch(() => (loadersState = 'error'));
 	});
 
-	function toggleHorizonModSelection(modId: string) {
-		if (selectedHorizonModIds.includes(modId)) {
-			selectedHorizonModIds = selectedHorizonModIds.filter((id) => id !== modId);
-		} else {
-			selectedHorizonModIds = [...selectedHorizonModIds, modId];
-		}
-	}
-
 	async function create() {
-		if (!canCreate || isCreating) return;
+		if (isCreating) return;
+        if (!canCreate) throw new Error('Preencha os campos obrigatórios.');
 		isCreating = true;
 		try {
 			const isHz = loader === 'horizon-rust';
+			const finalName = name.trim() || getDefaultName(loader);
 
 			const inst = app.newInstance({
-				name: name.trim(),
+				name: finalName,
 				icon,
 				engine: isHz ? 'rust' : 'java',
 				gameVersion: isHz ? '26.3' : gameVersion,
@@ -187,10 +208,11 @@
 					for (const mod of OFFICIAL_HORIZON_MODS) {
 						bulkStates[mod.id] = selectedHorizonModIds.includes(mod.id);
 					}
-					await setHorizonModsBulk(inst.id, bulkStates).catch(() => {});
+					await ensureHorizonModsInstalled(inst);
+                    await app.saveInstances();
 				}
 
-				toasts.ok(`Instância Horizon Rust "${inst.name}" criada com ${selectedHorizonModIds.length} mods ativados!`);
+				toasts.ok(`Perfil "${inst.name}" criado e salvo com sucesso!`);
 			} else if (selectedJavaItems.length > 0) {
 				toasts.info(`Instalando ${selectedJavaItems.length} mods para ${inst.name}...`);
 				const targetLoaders = loadersFor(contentTabKind, loader);
@@ -208,14 +230,16 @@
 						gameVersion
 					}
 				);
-				app.saveInstances();
-				toasts.ok(`Instância "${inst.name}" criada com ${res.successCount} mods instalados!`);
+				await app.saveInstances();
+                if (res.errors.length) toasts.err(res.errors.join("\n"));
+				toasts.ok(`Perfil "${inst.name}" criado com ${res.successCount} mods instalados!`);
 			} else {
-				toasts.ok(`Instância "${inst.name}" criada com sucesso!`);
+				toasts.ok(`Perfil "${inst.name}" criado e salvo com sucesso!`);
 			}
 
 			open = false;
 			name = '';
+			icon = DEFAULT_LOADER_ICON[loader] ?? 'creeper';
 			autoJoin = '';
 			extraArgs = '';
 			selectedJavaItems = [];
@@ -223,22 +247,30 @@
 			oncreated?.(inst);
 		} catch (e) {
 			toasts.err(e);
+            throw e;
 		} finally {
 			isCreating = false;
 		}
 	}
 
 	const loaderTabs = [
-		{ id: 'horizon-rust', label: 'Rust (Horizon 26.3 · Vulkan)' },
-		{ id: 'fabric', label: 'Fabric (Java)' },
-		{ id: 'quilt', label: 'Quilt (Java)' },
-		{ id: 'neoforge', label: 'NeoForge (Java)' },
-		{ id: 'forge', label: 'Forge (Java)' },
-		{ id: 'vanilla', label: 'Vanilla (Mojang)' }
+		{ id: 'horizon-rust', label: 'Rust' },
+		{ id: 'fabric', label: 'Fabric' },
+		{ id: 'vanilla', label: 'Vanilla' },
+		{ id: 'forge', label: 'Forge' }
 	];
+
+	function handleLoaderChange(val: string) {
+		const prevDefault = getDefaultName(loader);
+		loader = val as ModLoader;
+		icon = DEFAULT_LOADER_ICON[val] ?? 'grass';
+		if (!name || name === prevDefault || name.startsWith('Tropicalia (')) {
+			name = getDefaultName(loader);
+		}
+	}
 </script>
 
-<Modal bind:open title="Nova Instância de Minecraft" width={820}>
+<Modal bind:this={createModal} bind:open dirty={!!name || selectedJavaItems.length > 0} onsave={create} dismissable={!isCreating} title={tr("Novo Perfil de Minecraft")} width={820}>
 	<div class="flex flex-col gap-4">
 		<!-- Navegação entre Configuração Básica e Mods -->
 		<div class="flex items-center justify-between gap-3 border-b border-[#24322b] pb-2 flex-wrap">
@@ -247,8 +279,8 @@
 					{ id: 'general', label: '1. Configuração & Parâmetros' },
 					{
 						id: 'mods',
-						label: loader === 'horizon-rust' ? '2. Mods Horizon (.hmod)' : loader === 'vanilla' ? '2. Texturas & Shaders' : '2. Escolher Mods (.jar)',
-						count: loader === 'horizon-rust' ? selectedHorizonModIds.length : selectedJavaItems.length || undefined
+						label: loader === 'vanilla' ? '2. Texturas & Shaders' : loader === 'horizon-rust' ? '2. Escolher Mods (Rust)' : '2. Escolher Mods (.jar)',
+						count: (loader === 'horizon-rust' ? selectedHorizon.length : selectedJavaItems.length) || undefined
 					}
 				]}
 				bind:value={activeModalTab}
@@ -257,10 +289,8 @@
 
 			<span class="text-[11.5px] text-[#bef264] flex items-center gap-1.5 font-mc">
 				<Check size={14} />
-				{#if loader === 'horizon-rust'}
-					{selectedHorizonModIds.length} mods Rust ativados
-				{:else if selectedJavaItems.length > 0}
-					{selectedJavaItems.length} mod(s) selecionado(s)
+				{#if (loader === 'horizon-rust' ? selectedHorizon.length : selectedJavaItems.length) > 0}
+					{loader === 'horizon-rust' ? selectedHorizon.length : selectedJavaItems.length} mod(s) selecionado(s)
 				{:else}
 					Pronto para configurar
 				{/if}
@@ -274,17 +304,17 @@
 					<div class="flex items-center gap-3">
 						<BlockIcon {icon} size={54} />
 						<div class="sm:hidden">
-							<span class="tp-label">Ícone</span>
+							<span class="tp-label">{tr("Ícone")}</span>
 						</div>
 					</div>
 					<div>
-						<label class="tp-label" for="inst-new-name">Nome da Instância</label>
-						<input id="inst-new-name" class="tp-input" bind:value={name} placeholder="Ex.: Aventura Rust Vulkan" maxlength="40" />
+						<label class="tp-label" for="inst-new-name">Nome do Perfil</label>
+						<input id="inst-new-name" class="tp-input" bind:value={name} placeholder="Ex.: Tropicalia (Rust)" maxlength="40" />
 					</div>
 				</div>
 
 				<div>
-					<span class="tp-label">Ícone do Bloco</span>
+					<span class="tp-label">{tr("Ícone do Bloco")}</span>
 					<div class="flex flex-wrap gap-2">
 						{#each Object.keys(BLOCK_ICONS) as key (key)}
 							<button
@@ -302,35 +332,31 @@
 				</div>
 
 				<div>
-					<span class="tp-label">Motor & Modloader</span>
+					<span class="tp-label">{tr("Tipo de Minecraft")}</span>
 					<div class="overflow-x-auto pb-1">
-						<TabSelector tabs={loaderTabs} bind:value={loader as string} size="sm" />
+						<TabSelector tabs={loaderTabs} value={loader} onchange={handleLoaderChange} size="sm" />
 					</div>
 					<div class="mt-2 p-2.5 rounded bg-[#0d1612] border border-[#1b2b22] text-[12px]">
 						{#if loader === 'horizon-rust'}
 							<div class="flex items-center gap-2 text-[#34d399] font-semibold mb-0.5">
-								<Cpu size={16} /> Motor Nativo Horizon Rust 26.3 (Vulkan)
+								<Cpu size={16} /> Motor Nativo Rust 26.3 (Vulkan)
 							</div>
 							<p class="tp-muted text-[11.5px]">
 								Reescrito 100% em Rust sem necessidade de JVM Java. Renderização direta em hardware Vulkan com altíssimo FPS, carregamento instantâneo e suporte a mods nativos <code>.hmod</code>.
 							</p>
 						{:else if loader === 'fabric'}
 							<p class="tp-muted text-[11.5px]">Fabric: Leve, modular e ideal para mods modernos de desempenho (Sodium, Iris) e jogabilidade.</p>
-						{:else if loader === 'neoforge'}
-							<p class="tp-muted text-[11.5px]">NeoForge: Sucessor oficial do Forge para 1.20.2+, compatível com Create, Mekanism e grandes modpacks.</p>
 						{:else if loader === 'forge'}
-							<p class="tp-muted text-[11.5px]">Forge clássico: Ideal para modpacks consolidados da versão 1.20.1 e anteriores.</p>
-						{:else if loader === 'quilt'}
-							<p class="tp-muted text-[11.5px]">Quilt: Ecossistema compatível com Fabric com recursos adicionais de carregamento.</p>
+							<p class="tp-muted text-[11.5px]">Forge: Ideal para modpacks consolidados e grandes mods clássicos.</p>
 						{:else}
-							<p class="tp-muted text-[11.5px]">Minecraft Java Oficial direto dos servidores da Mojang (sem suporte a mods de código).</p>
+							<p class="tp-muted text-[11.5px]">Vanilla: Minecraft Java Oficial direto dos servidores da Mojang.</p>
 						{/if}
 					</div>
 				</div>
 
 				<div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
 					<div>
-						<label class="tp-label" for="mc-ver-sel">Versão do Jogo</label>
+						<label class="tp-label" for="mc-ver-sel">{tr("Versão do Jogo")}</label>
 						{#if loader === 'horizon-rust'}
 							<input id="mc-ver-sel" class="tp-input font-mono" value="26.3 (Horizon Nativo)" disabled />
 						{:else if versionsError}
@@ -397,158 +423,34 @@
 						</div>
 						<div>
 							<label class="tp-label" for="hz-init-server">Servidor Rápido (Auto-Join)</label>
-							<input id="hz-init-server" class="tp-input font-mono" placeholder="tropicaliacraft.online" bind:value={autoJoin} />
+							<input id="hz-init-server" class="tp-input font-mono" placeholder="tropicaliacraft.gustavolara.pro" bind:value={autoJoin} />
 						</div>
 					</div>
 				{/if}
 
 				<div class="pt-2 flex justify-end">
 					<PixelButton variant="gold" icon={Puzzle} onclick={() => (activeModalTab = 'mods')}>
-						{#if loader === 'horizon-rust'}
-							Avançar para seleção de mods .hmod ({selectedHorizonModIds.length} ativados) →
-						{:else}
-							Avançar para escolha de mods →
-						{/if}
+						Avançar para escolha de mods →
 					</PixelButton>
 				</div>
 			</div>
 		{:else}
 			<!-- 2. ABA DE ESCOLHA DE MODS -->
 			<div class="grid gap-3">
-				{#if loader === 'horizon-rust'}
-					<!-- CATÁLOGO OFICIAL DE MODS HORIZON RUST -->
-					<div class="p-3.5 rounded-lg bg-[#0e1814] border border-[#10b981]/30 flex flex-wrap items-center justify-between gap-3">
-						<div class="flex items-center gap-3">
-							<Cpu size={22} class="text-[#34d399]" />
-							<div>
-								<h4 class="font-mc text-[13px] text-white flex items-center gap-2">
-									Mods Integrados do Horizon Rust 26.3
-									<Badge tone="green" pixel>{selectedHorizonModIds.length} ativados</Badge>
-								</h4>
-								<p class="tp-muted text-[11.5px]">Selecione os mods nativos que já começarão ativados na sua nova instância (77 disponíveis).</p>
-							</div>
-						</div>
-						<div class="flex items-center gap-2">
-							<PixelButton
-								size="xs"
-								variant="gold"
-								icon={Sparkles}
-								onclick={() => (selectedHorizonModIds = OFFICIAL_HORIZON_MODS.filter((m) => m.defaultEnabled).map((m) => m.id))}
-							>
-								Padrões Horizon
-							</PixelButton>
-							<PixelButton
-								size="xs"
-								variant="ghost"
-								onclick={() => (selectedHorizonModIds = OFFICIAL_HORIZON_MODS.map((m) => m.id))}
-							>
-								Marcar todos ({OFFICIAL_HORIZON_MODS.length})
-							</PixelButton>
-							<PixelButton
-								size="xs"
-								variant="ghost"
-								onclick={() => (selectedHorizonModIds = [])}
-							>
-								Desmarcar todos
-							</PixelButton>
-						</div>
-					</div>
-
-					<!-- Barra de busca e categorias -->
-					<div class="flex flex-col gap-2">
-						<input
-							class="tp-input !h-9 w-full"
-							placeholder="Buscar entre os 77 mods do Horizon (nome, ID, autor)..."
-							bind:value={horizonSearch}
+					{#if loader === 'horizon-rust'}
+						<p class="tp-help !mt-0">
+							Escolha os mods Rust (Horizon 26.3) que já virão ativados em <b>{name || 'sua instância'}</b>. Mesmo catálogo e rolagem infinita do Java.
+						</p>
+						<ContentPickerInline
+							bind:kind={contentTabKind}
+							allowedKinds={['mod', 'shader', 'resourcepack']}
+							loaders={['horizon-rust']}
+							horizon
+							gameVersion="26.3"
+							mode="select"
+							bind:selected={selectedHorizon}
+							compact
 						/>
-
-						<div class="flex flex-wrap items-center gap-1.5 overflow-x-auto pb-1 text-[11px]">
-							{#each HORIZON_CATEGORIES as cat (cat.id)}
-								{@const countInCat = cat.id === 'all' ? OFFICIAL_HORIZON_MODS.length : OFFICIAL_HORIZON_MODS.filter((m) => m.category === cat.id).length}
-								<button
-									class="px-2.5 py-1 rounded-full border transition-all cursor-pointer font-medium"
-									class:bg-[#153424]={horizonCategory === cat.id}
-									class:border-[#10b981]={horizonCategory === cat.id}
-									class:text-[#bef264]={horizonCategory === cat.id}
-									class:bg-[#0c1612]={horizonCategory !== cat.id}
-									class:border-[#1b2b22]={horizonCategory !== cat.id}
-									class:text-[#9ca3af]={horizonCategory !== cat.id}
-									onclick={() => (horizonCategory = cat.id)}
-								>
-									{cat.label} ({countInCat})
-								</button>
-							{/each}
-						</div>
-					</div>
-
-					<div class="tp-slot divide-y divide-[#1d2a23] max-h-[380px] overflow-y-auto pr-1">
-						{#if filteredHorizonMods.length}
-							{#each filteredHorizonMods as mod (mod.id)}
-								{@const isSelected = selectedHorizonModIds.includes(mod.id)}
-								<div
-									class="flex items-center gap-3 p-3 transition-colors cursor-pointer hover:bg-[#132219]"
-									class:bg-[#0f241a]={isSelected}
-									class:opacity-60={!isSelected}
-									role="button"
-									tabindex="0"
-									onclick={() => toggleHorizonModSelection(mod.id)}
-									onkeydown={(e) => {
-										if (e.key === 'Enter' || e.key === ' ') {
-											e.preventDefault();
-											toggleHorizonModSelection(mod.id);
-										}
-									}}
-								>
-									{#if mod.iconUrl}
-										<img src={mod.iconUrl} alt="" class="w-9 h-9 rounded object-contain bg-[#0e1713] p-0.5 border border-[#1b2b22] shrink-0" />
-									{:else}
-										<div class="w-9 h-9 rounded bg-[#162a20] flex items-center justify-center shrink-0 border border-[#223d2e]" class:text-[#34d399]={isSelected} class:text-[#4b5563]={!isSelected}>
-											{#if mod.kind === 'native-mod'}
-												<Cpu size={18} />
-											{:else}
-												<Package size={18} />
-											{/if}
-										</div>
-									{/if}
-
-									<div class="min-w-0 flex-1">
-										<div class="flex items-center gap-2 flex-wrap">
-											<b class="text-[13px] text-white font-mc tracking-wide">{mod.name}</b>
-											{#if isSelected}
-												<Badge tone="green" pixel>Ativado</Badge>
-											{:else}
-												<Badge tone="muted">Desativado</Badge>
-											{/if}
-											{#if mod.defaultEnabled}
-												<Badge tone="gold">Padrão</Badge>
-											{/if}
-											{#if mod.kind === 'native-mod'}
-												<Badge tone="blue">Nativo</Badge>
-											{/if}
-										</div>
-										<p class="text-[11.5px] tp-muted truncate mt-0.5">{mod.summary}</p>
-										<span class="text-[10.5px] font-mono text-[#6b7280]">id: {mod.id} · {mod.filename} · {formatBytes(mod.size)}</span>
-									</div>
-									<span
-										class="shrink-0"
-										role="presentation"
-										onclick={(e) => e.stopPropagation()}
-										onkeydown={(e) => e.stopPropagation()}
-									>
-										<Toggle checked={isSelected} onchange={() => toggleHorizonModSelection(mod.id)} />
-									</span>
-								</div>
-							{/each}
-						{:else}
-							<div class="py-10 text-center tp-muted text-[13px]">
-								Nenhum mod encontrado para a busca "{horizonSearch}".
-							</div>
-						{/if}
-					</div>
-
-					<p class="tp-help !mt-1">
-						Os mods selecionados serão configurados automaticamente em <code>horizon-mods.txt</code> e estarão prontos para jogar sem precisar de downloads adicionais.
-					</p>
 				{:else}
 					<!-- CATÁLOGO MODRINTH PARA INSTÂNCIAS JAVA -->
 					<p class="tp-help !mt-0">
@@ -570,20 +472,20 @@
 	</div>
 
 	{#snippet footer()}
-		<PixelButton variant="ghost" onclick={() => (open = false)}>Cancelar</PixelButton>
+		<PixelButton variant="ghost" onclick={() => createModal?.close()}>{tr("Cancelar")}</PixelButton>
 		<PixelButton
 			variant="emerald"
 			icon={Sparkles}
 			disabled={!canCreate || isCreating}
 			loading={isCreating}
-			onclick={create}
+			onclick={() => create().catch(() => {})}
 		>
 			{#if loader === 'horizon-rust'}
-				Criar Instância Horizon Rust ({selectedHorizonModIds.length} mods)
+				Criar Perfil Rust ({selectedHorizonModIds.length} mods)
 			{:else if selectedJavaItems.length > 0}
-				Criar Instância (+{selectedJavaItems.length} {selectedJavaItems.length === 1 ? 'mod' : 'mods'})
+				Criar Perfil (+{selectedJavaItems.length} {selectedJavaItems.length === 1 ? 'mod' : 'mods'})
 			{:else}
-				Criar Instância
+				Criar Perfil
 			{/if}
 		</PixelButton>
 	{/snippet}

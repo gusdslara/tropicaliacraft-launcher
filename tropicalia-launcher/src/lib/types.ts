@@ -168,7 +168,39 @@ export interface Instance {
 	playTimeMinutes: number;
 }
 
-export type ServerEngine = 'magma' | 'mohist' | 'arclight' | 'paper' | 'purpur' | 'fabric';
+export type ServerEngine = 'vanilla' | 'paper' | 'purpur' | 'folia' | 'fabric' | 'forge' | 'neoforge' | 'magma' | 'mohist' | 'arclight';
+
+/** Servidor da lista "Servidores" da tela inicial (como a lista de multiplayer do jogo). */
+export interface SavedServer {
+	id: string;
+	name: string;
+	address: string;
+	/** perfil usado para entrar (vazio = escolher na hora) */
+	instanceId?: string;
+	/** o TropicaliaCraft oficial: vem adicionado e não pode ser removido */
+	builtin?: boolean;
+	addedAt: string;
+}
+
+/** Resposta do `server_ping` (Server List Ping do Java Edition). */
+export interface PingResult {
+	online: boolean;
+	latencyMs?: number | null;
+	motd?: unknown;
+	favicon?: string | null;
+	playersOnline?: number | null;
+	playersMax?: number | null;
+	sample?: string[];
+	version?: string | null;
+	protocol?: number | null;
+	resolved?: string | null;
+	error?: string | null;
+}
+
+export interface LanServer {
+	motd: string;
+	address: string;
+}
 export type ServerStatus = 'stopped' | 'installing' | 'starting' | 'running' | 'stopping' | 'crashed';
 
 export interface LocalServer {
@@ -199,6 +231,8 @@ export interface Settings {
 	showSnapshots: boolean;
 	lastInstanceId?: string;
 	activeAccountId?: string;
+	/** Touch controls shared by the Java and Rust engines on Android. */
+	controls?: import('./controls').ControlsConfig;
 }
 
 export interface ProgressEvent {

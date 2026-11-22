@@ -3,10 +3,11 @@
 	let {
 		checked = $bindable(false),
 		label,
+        ariaLabel,
 		help,
 		disabled = false,
 		onchange
-	}: { checked?: boolean; label?: string; help?: string; disabled?: boolean; onchange?: (v: boolean) => void } = $props();
+	}: { checked?: boolean; label?: string; ariaLabel?: string; help?: string; disabled?: boolean; onchange?: (v: boolean) => void } = $props();
 </script>
 
 <label class="row" class:disabled>
@@ -14,7 +15,7 @@
 		type="button"
 		role="switch"
 		aria-checked={checked}
-		aria-label={label}
+		aria-label={ariaLabel ?? label}
 		{disabled}
 		class="sw"
 		class:on={checked}
@@ -38,6 +39,8 @@
 		display: flex;
 		align-items: center;
 		gap: 12px;
+        min-height: 44px;
+        min-width: 0;
 		cursor: pointer;
 	}
 	.disabled {

@@ -114,7 +114,8 @@ pub async fn fetch(client: &reqwest::Client, job: &Job) -> Result<u64, String> {
 }
 
 async fn fetch_once(client: &reqwest::Client, job: &Job) -> Result<u64, String> {
-    let resp = client.get(&job.url).send().await.map_err(|e| e.to_string())?;
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(60), client.get(&job.url).send())
+        .await.map_err(|_| "Download response timed out".to_owned())?.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("HTTP {}", resp.status()));
     }
@@ -127,7 +128,8 @@ async fn fetch_once(client: &reqwest::Client, job: &Job) -> Result<u64, String> 
     let mut hasher256 = Sha256::new();
     let mut stream = resp.bytes_stream();
     let mut total = 0u64;
-    while let Some(chunk) = stream.next().await {
+    while let Some(chunk) = tokio::time::timeout(std::time::Duration::from_secs(60), stream.next())
+        .await.map_err(|_| "Download stalled for 60 seconds".to_owned())? {
         let chunk = chunk.map_err(|e| e.to_string())?;
         hasher.update(&chunk);
         hasher256.update(&chunk);

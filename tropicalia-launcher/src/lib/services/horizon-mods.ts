@@ -84,6 +84,7 @@ export const HORIZON_CATEGORIES: Array<{ id: HorizonModCategory; label: string; 
 ];
 
 export const DEFAULT_ENABLED_MOD_IDS = new Set([
+	// Base Horizon mods
 	'coords_hud',
 	'fps_overlay',
 	'zoom',
@@ -96,17 +97,31 @@ export const DEFAULT_ENABLED_MOD_IDS = new Set([
 	'armor_status',
 	'armorhud',
 	'discord_rpc',
-	'fast_items'
+	'fast_items',
+	// Tropicalia Default Rust Mods
+	'accurate_block_placement',
+	'blockscope',
+	'chatheads',
+	'minimap',
+	'voicechat',
+	'visuality_horizon',
+	'toggle_sprint',
+	'smartf3',
+	'mod_menu',
+	'freelook',
+	'eatinganimation',
+	'distant_horizons',
+	'customhud'
 ]);
 
 function categorizeMod(id: string, kind: string): HorizonModCategory {
 	if (kind === 'shader') return 'shader';
 	if (['minimap', 'waymap', 'waypoints', 'wayfarer_stones', 'wayfarer_stones_native'].includes(id)) return 'map';
 	if (['voicechat', 'serverify', 'rmotd', 'chatheads', 'crossversion', 'killc', 'discord_rpc'].includes(id)) return 'multiplayer';
-	if (['visuality_horizon', 'motion_blur', 'smoothie_capes', 'flair', 'invisible_frames', 'menu_panorama', 'dynamic_lights'].includes(id)) return 'visual';
+	if (['visuality_horizon', 'eatinganimation', 'motion_blur', 'smoothie_capes', 'flair', 'invisible_frames', 'menu_panorama', 'dynamic_lights'].includes(id)) return 'visual';
 	if (['distant_horizons', 'fast_items'].includes(id)) return 'performance';
-	if (['coords_hud', 'fps_overlay', 'armor_status', 'armorhud', 'basic_hud', 'compass_bar', 'customhud', 'crosshair_indicator', 'status_effect_hud', 'smartf3', 'held_item_info', 'light_overlay', 'keystrokes'].includes(id)) return 'hud';
-	if (['zoom', 'classic_zoom', 'appleskin', 'appleskin_horizon', 'accurate_block_placement', 'mouse_tweaks', 'mousetricks', 'inventory_profiles', 'inventory_wizard', 'shulker_peek', 'fullbright', 'fullbright_horizon', 'fullbright_nofog', 'stuck', 'hitbox_plus', 'enchantmenthints'].includes(id)) return 'qol';
+	if (['coords_hud', 'fps_overlay', 'armor_status', 'armorhud', 'basic_hud', 'blockscope', 'compass_bar', 'customhud', 'crosshair_indicator', 'status_effect_hud', 'smartf3', 'held_item_info', 'light_overlay', 'keystrokes'].includes(id)) return 'hud';
+	if (['zoom', 'classic_zoom', 'appleskin', 'appleskin_horizon', 'accurate_block_placement', 'toggle_sprint', 'mod_menu', 'freelook', 'mouse_tweaks', 'mousetricks', 'inventory_profiles', 'inventory_wizard', 'shulker_peek', 'fullbright', 'fullbright_horizon', 'fullbright_nofog', 'stuck', 'hitbox_plus', 'enchantmenthints'].includes(id)) return 'qol';
 	return 'gameplay';
 }
 
@@ -147,7 +162,7 @@ export async function getHorizonRegistry(force = false): Promise<HorizonRegistry
 		return cachedRegistry;
 	}
 	try {
-		const data = await getJson<HorizonRegistry>(HORIZON_MODS_INDEX_URL);
+		const data = await getJson<HorizonRegistry>(HORIZON_MODS_INDEX_URL, {signal: AbortSignal.timeout(8000)});
 		cachedRegistry = data;
 		lastFetchTime = now;
 		return data;
@@ -155,6 +170,7 @@ export async function getHorizonRegistry(force = false): Promise<HorizonRegistry
 		// Fallback para o index.json local empacotado
 		const reg = INDEX_DATA as unknown as HorizonRegistry;
 		cachedRegistry = reg;
+		lastFetchTime = now;
 		return reg;
 	}
 }
@@ -193,14 +209,8 @@ export async function searchHorizonMods(
 }
 
 export async function fetchHorizonModsState(instanceId: string): Promise<Record<string, boolean>> {
-	if (isTauri) {
-		try {
-			return await call<Record<string, boolean>>('horizon_mods_state_get', { instanceId });
-		} catch (e) {
-			console.error('Falha ao ler horizon-mods.txt via Tauri:', e);
-		}
-	}
-	return {};
+    if (isTauri) return call<Record<string, boolean>>('horizon_mods_state_get', { instanceId });
+    return {};
 }
 
 export async function setHorizonModState(instanceId: string, modId: string, enabled: boolean): Promise<void> {
@@ -216,7 +226,7 @@ export async function setHorizonModsBulk(instanceId: string, states: Record<stri
 }
 
 export async function installHorizonMod(
-	instance: { id: string; content: Record<string, InstalledContent> },
+	instance: { id: string; content: Record<string, InstalledContent>; rustBinaryPath?: string },
 	mod: HorizonModProject,
 	version?: HorizonModVersion
 ): Promise<void> {
@@ -226,11 +236,15 @@ export async function installHorizonMod(
 	}
 
 	const filename = v.file.name;
-	if (isTauri) {
+	const native = filename.endsWith('.hnmod');
+	if (native && !(await supportedHorizonNativeMods(instance)).has(mod.id)) {
+		throw new Error(`${mod.name}: .hnmod requires an engine compiled with this native mod.`);
+	}
+	if (isTauri && !native) {
 		await call('content_install', {
 			ownerKind: 'instance',
 			ownerId: instance.id,
-			kind: 'mod',
+			kind: mod.kind === 'shader' ? 'shader' : mod.kind === 'resourcepack' ? 'resourcepack' : 'horizon-mod',
 			files: [
 				{
 					url: v.file.url,
@@ -241,12 +255,12 @@ export async function installHorizonMod(
 				}
 			]
 		});
-		await setHorizonModState(instance.id, mod.id, true);
 	}
+	await setHorizonModState(instance.id, mod.id, true);
 
 	const installed: InstalledContent = {
 		filename,
-		kind: 'mod',
+		kind: mod.kind === 'shader' ? 'shader' : mod.kind === 'resourcepack' ? 'resourcepack' : 'mod',
 		title: mod.name,
 		projectId: mod.id,
 		versionId: v.version,
@@ -256,12 +270,26 @@ export async function installHorizonMod(
 		size: v.file.size
 	};
 
-	instance.content[filename] = installed;
+    for (const previous of Object.values(instance.content)) {
+        if (previous.projectId !== mod.id || previous.filename === filename) continue;
+        if (isTauri && !native) await call('content_delete', {
+            ownerKind: 'instance', ownerId: instance.id,
+            kind: mod.kind === 'shader' ? 'shader' : mod.kind === 'resourcepack' ? 'resourcepack' : 'horizon-mod',
+            filename: previous.filename
+        });
+        delete instance.content[previous.filename];
+    }
+    instance.content[filename] = installed;
+}
+
+export async function supportedHorizonNativeMods(instance: {id: string; rustBinaryPath?: string}): Promise<Set<string>> {
+	if (!isTauri) return new Set();
+	return new Set(await call<string[]>('horizon_native_mods', { instanceId: instance.id, binaryPath: instance.rustBinaryPath || null }));
 }
 
 /**
  * Garante que uma instância Horizon Rust inicialize com o ecossistema oficial de mods,
- * sincronizando com horizon-mods.txt e marcando os padrões ativos.
+ * sincronizando com horizon-mods.txt e marcando os padrões Tropicalia ativos.
  */
 export function seedHorizonInstanceMods(inst: Instance, selectedIds?: string[]) {
 	if (inst.loader !== 'horizon-rust') return;
@@ -269,10 +297,13 @@ export function seedHorizonInstanceMods(inst: Instance, selectedIds?: string[]) 
 	for (const mod of OFFICIAL_HORIZON_MODS) {
 		const isEnabled = selectedIds ? selectedIds.includes(mod.id) : mod.defaultEnabled;
 
-		if (!inst.content[mod.filename] && !inst.content[`${mod.filename}.disabled`]) {
-			inst.content[mod.filename] = {
-				filename: mod.filename,
-				kind: 'mod',
+		if (selectedIds || (!inst.content[mod.filename] && !inst.content[`${mod.filename}.disabled`])) {
+			delete inst.content[mod.filename];
+			delete inst.content[`${mod.filename}.disabled`];
+			const targetFilename = isEnabled ? mod.filename : `${mod.filename}.disabled`;
+			inst.content[targetFilename] = {
+				filename: targetFilename,
+				kind: mod.kind === 'shader' ? 'shader' : mod.kind === 'resourcepack' ? 'resourcepack' : 'mod',
 				title: mod.name,
 				projectId: mod.id,
 				versionId: mod.version,
@@ -282,4 +313,30 @@ export function seedHorizonInstanceMods(inst: Instance, selectedIds?: string[]) 
 			};
 		}
 	}
+}
+
+/** Verify/download the selected files before launch, then persist the engine switches. */
+export async function ensureHorizonModsInstalled(inst: Instance) {
+	seedHorizonInstanceMods(inst);
+	// Compiled-in mods need no registry request or download to start, including offline.
+	const needsRegistry = OFFICIAL_HORIZON_MODS.some(mod => !mod.filename.endsWith('.hnmod') && !!inst.content[mod.filename]);
+	const registry = needsRegistry ? await getHorizonRegistry() : INDEX_DATA as unknown as HorizonRegistry;
+	const native = await supportedHorizonNativeMods(inst);
+	const states: Record<string, boolean> = {};
+	for (const mod of OFFICIAL_HORIZON_MODS) {
+		const supported = !mod.filename.endsWith('.hnmod') || native.has(mod.id);
+		const enabled = !!inst.content[mod.filename] && supported;
+        if (!supported && inst.content[mod.filename]) {
+            const item = inst.content[mod.filename];
+            delete inst.content[mod.filename];
+            const filename = `${mod.filename}.disabled`;
+            inst.content[filename] = {...item, filename};
+        }
+		states[mod.id] = enabled;
+		if (!enabled) continue;
+		const project = registry.projects.find(p => p.id === mod.id);
+		if (!project) throw new Error(`Mod indisponível: ${mod.name}`);
+		await installHorizonMod(inst, project);
+	}
+	await setHorizonModsBulk(inst.id, states);
 }

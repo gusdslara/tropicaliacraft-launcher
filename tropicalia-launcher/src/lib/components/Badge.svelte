@@ -14,11 +14,15 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 4px;
-		height: 20px;
+		min-height: 20px;
+        max-width: 100%;
+        min-width: 0;
+        overflow-wrap: anywhere;
+        flex-shrink: 0;
 		padding: 0 7px;
 		font-size: 11px;
 		font-weight: 600;
-		white-space: nowrap;
+		white-space: normal;
 		background: var(--c-bg);
 		color: var(--c-fg);
 		box-shadow: inset 0 0 0 1px var(--c-line);

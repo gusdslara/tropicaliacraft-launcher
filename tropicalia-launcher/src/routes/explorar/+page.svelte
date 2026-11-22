@@ -24,6 +24,8 @@
 	];
 
 	let kind = $state<ContentKind>((page.url.searchParams.get('tipo') as ContentKind) || 'mod');
+	let source = $state<'modrinth' | 'curseforge'>('modrinth');
+	$effect(() => { if (kind !== 'mod') source = 'modrinth'; });
 	let query = $state('');
 	let sort = $state<SortIndex>('relevance');
 	let categories = $state<string[]>([]);
@@ -86,6 +88,7 @@
 
 		try {
 			const r = await search({
+				source: kind === 'mod' ? source : 'modrinth',
 				query,
 				kind,
 				loaders: filterLoaders,
@@ -107,7 +110,7 @@
 
 	$effect(() => {
 		// dependências da busca
-		void [query, kind, sort, categories.length, filterLoaders.join(), filterVersion];
+		void [source, query, kind, sort, categories.length, filterLoaders.join(), filterVersion];
 		clearTimeout(timer);
 		timer = setTimeout(() => run(false), query ? 300 : 0);
 	});
@@ -134,11 +137,14 @@
 </script>
 
 <div class="mx-auto flex max-w-[1320px] flex-col gap-4 sm:gap-5">
+    {#if kind === 'mod' && target?.loader !== 'horizon-rust'}
+        <TabSelector tabs={[{ id: 'modrinth', label: 'Modrinth' }, { id: 'curseforge', label: 'CurseForge' }]} bind:value={source} />
+    {/if}
 	<div class="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
 		<div class="overflow-x-auto pb-1 scrollbar-none">
 			<TabSelector tabs={KINDS} value={kind} onchange={setKind} />
 		</div>
-		<span class="tp-muted text-xs text-right sm:text-left">Conteúdo de <button class="underline" onclick={() => openUrl('https://modrinth.com')}>modrinth.com</button></span>
+		<span class="tp-muted text-xs text-right sm:text-left">Conteúdo de <button class="underline" onclick={() => openUrl(source === 'curseforge' ? 'https://www.curseforge.com/minecraft' : 'https://modrinth.com')}>{source === 'curseforge' ? 'curseforge.com' : 'modrinth.com'}</button></span>
 	</div>
 
 	<!-- Barra de busca no topo para mobile e desktop -->
@@ -209,7 +215,7 @@
 
 					<TropicaliaCard title="Categorias" size="sm">
 						<div class="flex flex-wrap gap-1.5">
-							{#each CATEGORIES[kind] ?? [] as c (c.id)}
+							{#each (source === 'curseforge' ? [] : CATEGORIES[kind] ?? []) as c (c.id)}
 								<button class="chip" class:on={categories.includes(c.id)} onclick={() => toggleCategory(c.id)}>{c.label}</button>
 							{/each}
 						</div>
@@ -220,7 +226,7 @@
 
 		<div class="flex min-w-0 flex-col gap-4">
 			{#if error}
-				<TropicaliaCard plain><p class="text-[13px] text-[#fca5a5] selectable">Não foi possível falar com o Modrinth: {error}</p></TropicaliaCard>
+				<TropicaliaCard plain><p class="text-[13px] text-[#fca5a5] selectable">Não foi possível consultar o catálogo: {error}</p></TropicaliaCard>
 			{/if}
 
 			<div class="grid grid-cols-1 gap-3 xl:grid-cols-2">
@@ -248,7 +254,7 @@
 							{:else}
 								<PixelButton size="sm" variant="emerald" icon={Download} class="flex-1 sm:flex-none justify-center" onclick={() => openInstall(h)}>Instalar</PixelButton>
 							{/if}
-							<PixelButton size="sm" variant="ghost" icon={ExternalLink} title="Ver no Modrinth" onclick={() => openUrl(`https://modrinth.com/${h.project_type}/${h.slug}`)} />
+							<PixelButton size="sm" variant="ghost" icon={ExternalLink} title="Ver página do projeto" onclick={() => openUrl(h.project_id.startsWith('curseforge:') ? `https://www.curseforge.com/minecraft/mc-mods/${h.slug}` : `https://modrinth.com/${h.project_type}/${h.slug}`)} />
 						</div>
 					</article>
 				{:else}

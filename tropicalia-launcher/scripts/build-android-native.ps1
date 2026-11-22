@@ -49,6 +49,9 @@ if (Test-Path $horizonReleaseSo) {
 Write-Host "3/4 Copiando assets web e engine-data para o Amethyst-Android..."
 $webBuild = "$PSScriptRoot\..\build"
 $amethystAssets = "C:\dev\Amethyst-Android\app_pojavlauncher\src\main\assets"
+if (Test-Path "$amethystAssets\_app") {
+    Remove-Item "$amethystAssets\_app" -Recurse -Force
+}
 if (Test-Path $webBuild) {
     Copy-Item "$webBuild\*" $amethystAssets -Recurse -Force
 }
