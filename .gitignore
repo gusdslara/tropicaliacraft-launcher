@@ -1,2 +1,5 @@
 # Gerado por tropicalia-launcher/scripts/prepare-pojav.py (Pumpkin baixado do release oficial, ~125 MB)
 tools/pojav-android/app_pojavlauncher/src/main/jniLibs/arm64-v8a/libpumpkin.so
+
+# APKs gerados pelos scripts de build (vão para o GitHub Release, não para o Git)
+tropicalia-launcher/artifacts/*.apk

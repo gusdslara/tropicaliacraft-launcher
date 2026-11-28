@@ -144,9 +144,15 @@ patch(manifest, 'android:name="net.kdt.pojavlaunch.TestStorageActivity"', 'andro
 patch(manifest, 'android:name="com.tropicaliacraft.launcher.MainActivity"\n            android:exported="true"',
       'android:name="com.tropicaliacraft.launcher.MainActivity"\n            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|keyboard|uiMode|density"\n            android:exported="true"')
 patch(manifest, 'android:allowBackup="true"', 'android:allowBackup="false"')
-patch(manifest, '<application', '<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />\n    <application')
+def ensure_permission(path, name):
+    # Idempotent: several patches insert before <application, so "new in source" is not enough.
+    source = path.read_text(encoding='utf-8')
+    if f'android:name="{name}"' not in source:
+        path.write_text(source.replace('<application', f'<uses-permission android:name="{name}" />\n    <application', 1), encoding='utf-8')
+ensure_permission(manifest, 'android.permission.ACCESS_NETWORK_STATE')
 # LAN discovery (MainActivity holds a MulticastLock so "Open to LAN" announcements reach the launcher).
-patch(manifest, '<application', '<uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />\n    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />\n    <application')
+ensure_permission(manifest, 'android.permission.CHANGE_WIFI_MULTICAST_STATE')
+ensure_permission(manifest, 'android.permission.ACCESS_WIFI_STATE')
 cmake = app / 'src/main/jni/CMakeLists.txt'
 for module in ['mojoexec', 'glfw', 'sdl']:
     patch(cmake, f'add_subdirectory({module})', f'add_subdirectory("${{CMAKE_CURRENT_SOURCE_DIR}}/../../../../{module}" "${{CMAKE_CURRENT_BINARY_DIR}}/{module}")')
