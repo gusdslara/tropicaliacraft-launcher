@@ -1,0 +1,125 @@
+name: Release
+
+# Push a tag like v0.2.0 to build every desktop platform and attach them to a draft GitHub Release.
+# The signed Android APK is built locally (the release key never leaves the maintainer's machine),
+# attached with `gh release upload`, then SHA256SUMS.txt is refreshed and the draft is published.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)build, e.g. v0.1.0
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.release.outputs.id }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+      - id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sed "s/{{TAG}}/$TAG/g" .github/RELEASE_TEMPLATE.md > notes.md
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --draft --title "TropicaliaCraft Launcher $TAG" --notes-file notes.md --verify-tag
+          fi
+          echo "id=$(gh api "repos/$GITHUB_REPOSITORY/releases" --jq ".[] | select(.tag_name==\"$TAG\") | .id" | head -1)" >> "$GITHUB_OUTPUT"
+
+  desktop:
+    needs: create-release
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+            exe: .exe
+          - name: Linux x64
+            os: ubuntu-22.04
+          - name: macOS Apple Silicon
+            os: macos-latest
+            target: aarch64-apple-darwin
+          - name: macOS Intel
+            os: macos-latest
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev libasound2-dev libudev-dev
+
+      # Horizon (tools/horizon-android) pins its own toolchain in rust-toolchain.toml.
+      - name: Rust toolchains
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          (cd tools/horizon-android && rustup toolchain install)
+          if [ -n "${{ matrix.target }}" ]; then
+            rustup target add ${{ matrix.target }} --toolchain stable
+            (cd tools/horizon-android && rustup target add ${{ matrix.target }})
+          fi
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target || runner.os }}
+          workspaces: |
+            tools/horizon-android
+            tropicalia-launcher/src-tauri
+
+      # The Horizon engine ships inside the installer. Only the executable: it downloads the
+      # official game resources from Mojang on first use, so no game data is bundled.
+      - name: Build Horizon engine
+        shell: bash
+        working-directory: tools/horizon-android
+        run: cargo build --release --locked -p horizon-client --bin horizon-client ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
+      - uses: oven-sh/setup-bun@v2
+      - name: Stage Horizon into the bundle
+        shell: bash
+        working-directory: tropicalia-launcher
+        run: |
+          bun install --frozen-lockfile
+          bin=../tools/horizon-android/target/${{ matrix.target && format('{0}/', matrix.target) || '' }}release
+          bun scripts/stage-horizon.mjs --bin "$bin" --no-data
+
+      - uses: tauri-apps/tauri-action@action-v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          projectPath: tropicalia-launcher
+          tauriScript: bun run tauri
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          args: ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
+
+  checksums:
+    needs: [create-release, desktop]
+    if: always() && needs.create-release.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: SHA256SUMS.txt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir assets && cd assets
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" --skip-existing
+          rm -f SHA256SUMS.txt
+          sha256sum -- * | sort -k2 > ../SHA256SUMS.txt
+          cat ../SHA256SUMS.txt
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" ../SHA256SUMS.txt --clobber

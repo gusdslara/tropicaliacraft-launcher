@@ -92,7 +92,7 @@
 	</nav>
 </div>
 
-{#if app.launchPresentation}<LaunchPresentation />{/if}
+{#if app.launchPresentation}<LaunchPresentation task={app.tasks[app.launchPresentation]} />{/if}
 
 <AccountsModal />
 <UpdateModal />

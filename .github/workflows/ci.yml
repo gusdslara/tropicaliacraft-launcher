@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  launcher:
+    name: Launcher (check + tests)
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: tropicalia-launcher
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tropicalia-launcher/src-tauri
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev
+      - run: bun install --frozen-lockfile
+      - name: Type check
+        run: bun run check
+      - name: Frontend build
+        run: bun run build
+      - name: Rust tests
+        working-directory: tropicalia-launcher/src-tauri
+        run: cargo test --locked

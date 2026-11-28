@@ -2,8 +2,8 @@
   Compila o Tropicalia Launcher para Windows e publica os downloads da landing page.
 
   Uso (na pasta tropicalia-launcher):
-    npm run publish:windows              # compila e publica
-    npm run publish:windows -- -SkipBuild  # so publica o que ja foi compilado
+    bun run publish:windows              # compila e publica
+    bun run publish:windows -- -SkipBuild  # so publica o que ja foi compilado
 #>
 param(
   [switch]$SkipBuild,
@@ -57,10 +57,10 @@ if (-not $SkipBuild) {
   try {
     if ($target) {
       Write-Host "==> Compilando com MSVC ($target)" -ForegroundColor Green
-      & npx tauri build --target $target
+      & bunx tauri build --target $target
     } else {
       Write-Host '==> Compilando com toolchain padrao GNU/MinGW' -ForegroundColor Yellow
-      & npx tauri build
+      & bunx tauri build
     }
     if ($LASTEXITCODE -ne 0) { throw "tauri build falhou (codigo $LASTEXITCODE)" }
   } finally { Pop-Location; $ErrorActionPreference = 'Stop' }

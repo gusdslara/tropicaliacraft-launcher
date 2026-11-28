@@ -44,14 +44,14 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Com jogo ou servidor rodando, fechar a janela só esconde na bandeja.
+            // Com jogo ou servidor rodando, fechar a janela só esconde na bandeja (ou minimiza, sem bandeja).
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.app_handle().state::<AppState>();
                 let busy = state.games.try_lock().map(|g| !g.is_empty()).unwrap_or(true)
                     || state.servers.try_lock().map(|s| !s.is_empty()).unwrap_or(true);
                 if busy {
                     api.prevent_close();
-                    let _ = window.hide();
+                    tray::hide_main(window.app_handle());
                 }
             }
         })
@@ -98,6 +98,9 @@ pub fn run() {
             server::server_stop,
             server::server_running,
             server::server_delete,
+            server::server_native_bundled,
+            server::server_toml_read,
+            server::server_toml_write,
             server::local_ips,
             net::server_ping,
             net::lan_scan,

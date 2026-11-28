@@ -22,11 +22,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
-tauri-plugin-opener = "2"
-tauri-plugin-http = "2"
-tauri-plugin-store = "2"
-tauri-plugin-dialog = "2"
+# As versões menores do Tauri e dos plugins precisam bater com as do package.json (@tauri-apps/*):
+# plugin JS mais novo que o Rust quebra o IPC (ex.: fetch "expected a value for key clientConfig").
+tauri = { version = "~2.12", features = ["tray-icon", "image-png"] }
+tauri-plugin-opener = "~2.7"
+tauri-plugin-http = "~2.9"
+tauri-plugin-store = "~2.5"
+tauri-plugin-dialog = "~2.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "http2"] }
@@ -36,12 +38,17 @@ sha1 = "0.10"
 sha2 = "0.10"
 hex = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+toml_edit = "0.22"
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 
 # Cofre do sistema operacional para o refresh token da Microsoft
 # (Windows Credential Manager/DPAPI, macOS Keychain, Linux Secret Service).
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service", "crypto-rust"] }
+
+# Só para testar se a biblioteca da bandeja existe antes de criar o ícone (sem ela o tray-icon dá panic).
+[target.'cfg(target_os = "linux")'.dependencies]
+libloading = "0.7"
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

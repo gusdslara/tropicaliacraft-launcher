@@ -2,7 +2,7 @@
 import { call, isTauri, kv, on, secrets } from '$lib/platform';
 import * as ms from '$lib/services/microsoft-auth';
 import { checkForLauncherUpdates, type CheckUpdateResult } from '$lib/services/updates';
-import { DEFAULT_PROPERTIES, engine, resolveJar } from '$lib/services/server-engines';
+import { DEFAULT_PROPERTIES, PUMPKIN_INITIAL, engine, resolveJar } from '$lib/services/server-engines';
 import type {
 	Account,
 	Instance,
@@ -350,8 +350,8 @@ class App {
 			const list = (this.serverLogs[id] ??= []);
 			list.push(line);
 			if (list.length > 2000) list.splice(0, list.length - 2000);
-			const joined = line.match(/\]: (\w{3,16}) joined the game/);
-			const left = line.match(/\]: (\w{3,16}) left the game/);
+			const joined = line.match(/(?:\]: |INFO\s+)(\w{3,16}) joined the game/);
+			const left = line.match(/(?:\]: |INFO\s+)(\w{3,16}) left the game/);
 			const players = (this.serverPlayers[id] ??= []);
 			if (joined && !players.includes(joined[1])) players.push(joined[1]);
 			if (left) this.serverPlayers[id] = players.filter((p) => p !== left[1]);
@@ -575,7 +575,8 @@ class App {
 
 	// -------------------------------------------------------------- jogar
 
-	launchPresentation = $state(false);
+	/** id da instância cuja tela de abertura está na frente (jogo Java no desktop) */
+	launchPresentation = $state<string | null>(null);
 
 	async play(inst: Instance, serverAddress?: string) {
 		const acc = this.activeAccount;
@@ -606,7 +607,7 @@ class App {
 				await this.applyControls().catch((e) => console.warn('Controles de toque não aplicados', e));
 			}
 			if (this.system.os !== 'android' && inst.loader !== 'horizon-rust' && inst.engine !== 'rust') {
-				this.launchPresentation = true;
+				this.launchPresentation = inst.id;
 				await new Promise((resolve) => setTimeout(resolve, 2800));
 			}
 			await call('game_launch', {
@@ -657,7 +658,7 @@ class App {
 			inst.lastPlayedAt = previousPlayedAt;
 			throw e;
 		} finally {
-			this.launchPresentation = false;
+			this.launchPresentation = null;
 		}
 	}
 
@@ -699,22 +700,37 @@ class App {
 
 	async installServer(srv: LocalServer) {
 		this.serverStatus[srv.id] = 'installing';
+		const info = engine(srv.engine);
 		try {
-			const jar = srv.customJarUrl?.trim()
-				? { url: srv.customJarUrl.trim(), label: `${engine(srv.engine).name} (JAR manual)` }
-				: await resolveJar(srv.engine, srv.minecraftVersion, srv.flavor);
+			const manual = srv.customJarUrl?.trim();
+			// No APK o Pumpkin já vem embutido: instala sem internet.
+			const bundled = !!info.native && (await call<boolean>('server_native_bundled').catch(() => false));
+			const jar = bundled
+				? { url: '', label: `${info.name} · Minecraft ${srv.minecraftVersion} (incluso no app)` }
+				: manual
+					? { url: manual, label: `${info.name} (${info.native ? 'executável' : 'JAR'} manual)` }
+					: await resolveJar(srv.engine, srv.minecraftVersion, srv.flavor, this.system);
 			await call('server_install', {
 				serverId: srv.id,
 				url: jar.url,
-				sha1: jar.sha1 ?? null,
-				installer: !srv.customJarUrl?.trim() && !!engine(srv.engine).installer,
+				sha1: ('sha1' in jar && jar.sha1) || null,
+				sha256: ('sha256' in jar && jar.sha256) || null,
+				installer: !manual && !!info.installer,
+				native: !!info.native,
 				minecraftVersion: srv.minecraftVersion
 			});
-			const current = await call<Record<string, string>>('server_read_properties', { serverId: srv.id });
-			if (!Object.keys(current).length) {
-				await call('server_write_properties', { serverId: srv.id, values: DEFAULT_PROPERTIES });
+			if (info.native) {
+				const current = await call<Record<string, unknown>>('server_toml_read', { serverId: srv.id, file: 'pumpkin.toml', keys: Object.keys(PUMPKIN_INITIAL) });
+				if (!Object.keys(current).length) {
+					await call('server_toml_write', { serverId: srv.id, file: 'pumpkin.toml', values: PUMPKIN_INITIAL });
+				}
+			} else {
+				const current = await call<Record<string, string>>('server_read_properties', { serverId: srv.id });
+				if (!Object.keys(current).length) {
+					await call('server_write_properties', { serverId: srv.id, values: DEFAULT_PROPERTIES });
+				}
+				if (srv.eulaAccepted) await call('server_set_eula', { serverId: srv.id, accepted: true });
 			}
-			if (srv.eulaAccepted) await call('server_set_eula', { serverId: srv.id, accepted: true });
 			this.updateServer(srv.id, { installed: true, engineLabel: jar.label });
 			toasts.ok(`${jar.label} instalado`);
 		} finally {
@@ -724,9 +740,10 @@ class App {
 	}
 
 	async startServer(srv: LocalServer) {
-		if (!srv.eulaAccepted) throw new Error('Aceite a EULA do Minecraft para iniciar o servidor.');
+		const native = !!engine(srv.engine).native;
+		if (!native && !srv.eulaAccepted) throw new Error('Aceite a EULA do Minecraft para iniciar o servidor.');
 		if (!srv.installed) await this.installServer(srv);
-		await call('server_set_eula', { serverId: srv.id, accepted: true });
+		if (!native) await call('server_set_eula', { serverId: srv.id, accepted: true });
 		this.serverLogs[srv.id] = [];
 		this.serverStatus[srv.id] = 'starting';
 		try {
@@ -737,7 +754,8 @@ class App {
 					minecraftVersion: srv.minecraftVersion,
 					memoryMb: srv.memoryMb,
 					javaPath: this.settings.javaPath || null,
-					jvmArgs: PERF_PROFILES.maximo.flags.split(/\s+/)
+					jvmArgs: native ? [] : PERF_PROFILES.maximo.flags.split(/\s+/),
+					native
 				}
 			});
 			this.updateServer(srv.id, { lastStartedAt: new Date().toISOString() });
@@ -777,7 +795,7 @@ function withOfficialServer(list: SavedServer[]): SavedServer[] {
 	return [{ ...OFFICIAL_SERVER, instanceId: own?.instanceId ?? OFFICIAL_SERVER.instanceId }, ...rest];
 }
 
-/** No navegador (npm run dev) não há socket TCP: usa a API pública do mcsrvstat. */
+/** No navegador (bun run dev) não há socket TCP: usa a API pública do mcsrvstat. */
 async function webPing(address: string): Promise<PingResult> {
 	const r = await fetch(`https://api.mcsrvstat.us/3/${encodeURIComponent(address)}`);
 	const j = await r.json();

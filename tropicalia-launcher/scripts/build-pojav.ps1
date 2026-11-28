@@ -3,6 +3,8 @@ param(
     [string]$SupportLibraries = "C:/dev/Amethyst-Android/app_pojavlauncher/libs",
     [string]$JavaHome = 'C:/Program Files/Android/Android Studio/jbr',
     [switch]$UseBuiltRuntime,
+    # APK menor: sem o servidor Pumpkin embutido (o app baixa na primeira vez que for usado).
+    [switch]$SkipPumpkin,
     [switch]$PrepareOnly
 )
 $ErrorActionPreference = 'Stop'
@@ -23,7 +25,9 @@ if (-not (Test-Path -LiteralPath $localProps)) {
     Set-Content -LiteralPath $localProps -Value ("sdk.dir=" + ($env:ANDROID_HOME -replace '\\', '/')) -Encoding ascii
 }
 
-& python "$PSScriptRoot/prepare-pojav.py" --engine $enginePath --support $SupportLibraries
+$prepareArgs = @('--engine', $enginePath, '--support', $SupportLibraries)
+if ($SkipPumpkin) { $prepareArgs += '--skip-pumpkin' }
+& python "$PSScriptRoot/prepare-pojav.py" @prepareArgs
 if ($LASTEXITCODE -ne 0) { throw 'Falha ao preparar a integração Pojav.' }
 if ($PrepareOnly) { return }
 
@@ -32,9 +36,9 @@ if (-not $UseBuiltRuntime) {
     Push-Location $launcherRoot
     try {
         $started = Get-Date
-        # PS 5.1: com 'Stop', qualquer linha no stderr do npx vira erro fatal via 2>&1. Avaliamos o exit code nós mesmos.
+        # PS 5.1: com 'Stop', qualquer linha no stderr do bunx vira erro fatal via 2>&1. Avaliamos o exit code nós mesmos.
         $ErrorActionPreference = 'Continue'
-        & npx.cmd tauri android build --debug --target aarch64 --apk --split-per-abi 2>&1 | ForEach-Object { "$_" } | Tee-Object -Variable tauriOutput
+        & bunx tauri android build --debug --target aarch64 --apk --split-per-abi 2>&1 | ForEach-Object { "$_" } | Tee-Object -Variable tauriOutput
         $tauriExit = $LASTEXITCODE
         $ErrorActionPreference = 'Stop'
         if ($tauriExit -ne 0) {
@@ -51,7 +55,7 @@ if (-not (Test-Path -LiteralPath $native)) { throw "Runtime atualizado não enco
 $latestWebAsset = Get-ChildItem -LiteralPath (Join-Path $launcherRoot 'build') -File -Recurse |
     Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
 if ($latestWebAsset -and $latestWebAsset.LastWriteTimeUtc -gt (Get-Item -LiteralPath $native).LastWriteTimeUtc) {
-    throw 'O frontend é mais recente que o runtime Tauri. Recompile a biblioteca Android após npm run build antes de empacotar o APK.'
+    throw 'O frontend é mais recente que o runtime Tauri. Recompile a biblioteca Android após bun run build antes de empacotar o APK.'
 }
 $module = Join-Path $enginePath 'app_pojavlauncher'
 $jni = Join-Path $module 'src/main/jniLibs/arm64-v8a'

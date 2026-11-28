@@ -1427,9 +1427,7 @@ pub async fn game_launch(app: AppHandle, state: State<'_, AppState>, req: Launch
     crate::tray::refresh(&app).await;
 
     if req.hide_on_launch {
-        if let Some(w) = app.get_webview_window("main") {
-            let _ = w.hide();
-        }
+        crate::tray::hide_main(&app);
     }
 
     let app2 = app.clone();
@@ -1820,9 +1818,7 @@ pub async fn launch_horizon_rust(app: &AppHandle, state: &State<'_, AppState>, r
         crate::tray::refresh(app).await;
 
         if req.hide_on_launch {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.hide();
-            }
+            crate::tray::hide_main(app);
         }
 
         let app2 = app.clone();

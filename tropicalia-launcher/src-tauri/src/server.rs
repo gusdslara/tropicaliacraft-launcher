@@ -1,4 +1,4 @@
-//! Servidores locais: Paper, Purpur, Fabric e híbridos (Magma, Mohist, Arclight).
+//! Servidores locais: Paper, Purpur, Fabric, híbridos (Magma, Mohist, Arclight) e o Pumpkin (Rust, sem Java).
 //! O frontend resolve a URL do JAR pelas APIs de cada motor; aqui baixamos, aceitamos a EULA,
 //! editamos o server.properties e controlamos o processo com console em tempo real.
 
@@ -105,19 +105,102 @@ pub async fn server_install(
     server_id: String,
     url: String,
     sha1: Option<String>,
+    sha256: Option<String>,
     installer: Option<bool>,
+    native: Option<bool>,
     minecraft_version: Option<String>,
 ) -> Result<(), String> {
     let dir = paths::server(&app, &server_id)?;
     let jar = dir.join("server.jar");
     let _ = std::fs::remove_file(&jar);
+    if native.unwrap_or(false) {
+        return install_native(&app, &state, &server_id, &dir, url, sha256).await;
+    }
+    let _ = std::fs::remove_file(dir.join(NATIVE_BIN));
     if installer.unwrap_or(false) {
         let mc = minecraft_version.ok_or("Versão do Minecraft obrigatória para o instalador")?;
         return run_installer(&app, &state, &server_id, &dir, url, &mc).await;
     }
     download::emit(&app, &server_id, "server", 0, 1, "Baixando o motor do servidor");
-    download::fetch(&state.http, &Job { url, path: jar, sha1, sha256: None, size: None }).await?;
+    download::fetch(&state.http, &Job { url, path: jar, sha1, sha256, size: None }).await?;
     download::emit(&app, &server_id, "server", 1, 1, "Motor instalado");
+    Ok(())
+}
+
+/// Executável do servidor nativo (Pumpkin) dentro da pasta do servidor.
+const NATIVE_BIN: &str = if cfg!(windows) { "pumpkin.exe" } else { "pumpkin" };
+/// No APK o Pumpkin vai junto em `jniLibs` com nome de biblioteca (como o `libjava_exec.so`): a pasta
+/// de bibliotecas nativas é o único lugar de onde o Android deixa um app executar um programa.
+const ANDROID_BUNDLED_BIN: &str = "libpumpkin.so";
+/// Carregador do próprio Android: executa um programa que está na pasta de dados do app
+/// (onde o `exec` direto é proibido desde o Android 10). Usado só quando o Pumpkin foi baixado.
+const ANDROID_LINKER: &str = "/system/bin/linker64";
+
+/// Pumpkin que veio dentro do APK, se este build o incluiu.
+fn bundled_native(app: &AppHandle) -> Option<std::path::PathBuf> {
+    if !cfg!(target_os = "android") {
+        return None;
+    }
+    let bin = java::android_native_lib_dir(app).ok()?.join(ANDROID_BUNDLED_BIN);
+    bin.is_file().then_some(bin)
+}
+
+/// Programa do servidor nativo: o do APK (Android) ou o baixado para a pasta do servidor.
+pub fn native_binary(app: &AppHandle, dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    bundled_native(app).or_else(|| {
+        let bin = dir.join(NATIVE_BIN);
+        bin.is_file().then_some(bin)
+    })
+}
+
+/// Comando que inicia o servidor nativo. No Android, um executável baixado passa pelo carregador do sistema.
+fn native_command(app: &AppHandle, bin: &std::path::Path) -> tokio::process::Command {
+    if cfg!(target_os = "android") && bundled_native(app).as_deref() != Some(bin) {
+        let mut cmd = tokio::process::Command::new(ANDROID_LINKER);
+        cmd.arg(bin);
+        return cmd;
+    }
+    tokio::process::Command::new(bin)
+}
+
+/// O Pumpkin já vem no app (APK com `libpumpkin.so`)? Aí a instalação não baixa nada.
+#[tauri::command]
+pub fn server_native_bundled(app: AppHandle) -> bool {
+    bundled_native(&app).is_some()
+}
+
+/// Pumpkin: um executável único publicado no GitHub (conferido pelo SHA-256 do release), sem Java.
+async fn install_native(
+    app: &AppHandle,
+    state: &AppState,
+    id: &str,
+    dir: &std::path::Path,
+    url: String,
+    sha256: Option<String>,
+) -> Result<(), String> {
+    if bundled_native(app).is_some() {
+        download::emit(app, id, "server", 1, 1, "Motor instalado (incluso no app)");
+        return Ok(());
+    }
+    if cfg!(target_os = "android") && !std::path::Path::new(ANDROID_LINKER).exists() {
+        return Err("Este aparelho não é 64 bits: o servidor em Rust (Pumpkin) precisa de Android arm64.".into());
+    }
+    if url.trim().is_empty() {
+        return Err("Sem link para baixar o Pumpkin. Verifique a internet e tente de novo.".into());
+    }
+    let bin = dir.join(NATIVE_BIN);
+    download::emit(app, id, "server", 0, 1, "Baixando o servidor Pumpkin (cerca de 130 MB)");
+    // Sem hash conhecido (URL manual) o arquivo antigo passaria por válido: baixa de novo.
+    if sha256.is_none() {
+        let _ = std::fs::remove_file(&bin);
+    }
+    download::fetch(&state.http, &Job { url, path: bin.clone(), sha1: None, sha256, size: None }).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+    }
+    download::emit(app, id, "server", 1, 1, "Motor instalado");
     Ok(())
 }
 
@@ -206,7 +289,8 @@ pub fn launch_target(dir: &std::path::Path) -> Option<Vec<String>> {
 
 #[tauri::command]
 pub fn server_installed(app: AppHandle, server_id: String) -> Result<bool, String> {
-    Ok(launch_target(&paths::server(&app, &server_id)?).is_some())
+    let dir = paths::server(&app, &server_id)?;
+    Ok(launch_target(&dir).is_some() || native_binary(&app, &dir).is_some())
 }
 
 #[tauri::command]
@@ -379,6 +463,9 @@ pub struct StartRequest {
     pub java_path: Option<String>,
     #[serde(default)]
     pub jvm_args: Vec<String>,
+    /// Servidor nativo (Pumpkin): roda o executável direto, sem Java.
+    #[serde(default)]
+    pub native: bool,
 }
 
 #[tauri::command]
@@ -388,43 +475,67 @@ pub async fn server_start(app: AppHandle, state: State<'_, AppState>, req: Start
         return Err("Servidor já está rodando".into());
     }
     let dir = paths::server(&app, &id)?;
-    let Some(target) = launch_target(&dir) else {
-        return Err("Instale o motor do servidor antes de iniciar".into());
-    };
-    emit_status(&app, &id, "starting", None);
-
     let fail = |e: &String| {
         console(&app, &id, format!("Erro: {e}"));
         emit_status(&app, &id, "stopped", None);
     };
-    console(&app, &id, format!("Preparando o Java para o Minecraft {}…", req.minecraft_version));
-    let shared = paths::shared(&app)?;
-    let component = game::java_component_for(&state.http, &shared, &req.minecraft_version)
-        .await
-        .inspect_err(fail)?;
-    let java = java::resolve(&app, &state.http, &id, req.java_path.as_deref(), &component, true)
-        .await
-        .inspect_err(fail)?;
 
-    let mem = req.memory_mb.max(512);
-    let mut cmd = tokio::process::Command::new(&java);
-    java::configure_command(&mut cmd, &app, &component);
-    cmd.arg(format!("-Xms{}M", (mem / 2).max(512)))
-        .arg(format!("-Xmx{mem}M"));
-    // O Java do Pojav se identifica como "25.0.x-internal" e o Paper recusa builds que não são GA;
-    // essa propriedade (do próprio Paper) pula só essa checagem de versão.
-    // No Android não existe /tmp gravável: o JNA (usado pelo Paper) e o Java usam esta pasta.
-    if cfg!(target_os = "android") {
-        let tmp = dir.join(".tmp");
-        let _ = std::fs::create_dir_all(&tmp);
-        cmd.arg("-DPaper.IgnoreJavaVersion=true")
-            .arg(format!("-Djava.io.tmpdir={}", tmp.display()))
-            .arg(format!("-Djna.tmpdir={}", tmp.display()));
-    }
-    cmd.args(req.jvm_args.iter().filter(|a| !a.trim().is_empty()))
-        .args(&target)
-        .arg("nogui")
-        .current_dir(&dir)
+    let (mut cmd, started_msg, ready): (tokio::process::Command, String, fn(&str) -> bool) = if req.native {
+        let Some(bin) = native_binary(&app, &dir) else {
+            return Err("Instale o motor do servidor antes de iniciar".into());
+        };
+        emit_status(&app, &id, "starting", None);
+        let mut cmd = native_command(&app, &bin);
+        // Console simples (sem cores/TTY): as linhas chegam limpas no console do launcher.
+        cmd.env("NO_COLOR", "1");
+        if cfg!(target_os = "android") {
+            // Sem /tmp nem HOME graváveis no Android; os certificados do sistema ficam nesta pasta
+            // (login de contas originais no online mode).
+            let tmp = dir.join(".tmp");
+            let _ = std::fs::create_dir_all(&tmp);
+            cmd.env("TMPDIR", &tmp)
+                .env("HOME", &dir)
+                .env("SSL_CERT_DIR", "/system/etc/security/cacerts");
+        }
+        (cmd, "Iniciando o servidor Pumpkin (Rust)…".to_string(), |line| line.contains("Started server; took"))
+    } else {
+        let Some(target) = launch_target(&dir) else {
+            return Err("Instale o motor do servidor antes de iniciar".into());
+        };
+        emit_status(&app, &id, "starting", None);
+        console(&app, &id, format!("Preparando o Java para o Minecraft {}…", req.minecraft_version));
+        let shared = paths::shared(&app)?;
+        let component = game::java_component_for(&state.http, &shared, &req.minecraft_version)
+            .await
+            .inspect_err(fail)?;
+        let java = java::resolve(&app, &state.http, &id, req.java_path.as_deref(), &component, true)
+            .await
+            .inspect_err(fail)?;
+
+        let mem = req.memory_mb.max(512);
+        let mut cmd = tokio::process::Command::new(&java);
+        java::configure_command(&mut cmd, &app, &component);
+        cmd.arg(format!("-Xms{}M", (mem / 2).max(512)))
+            .arg(format!("-Xmx{mem}M"));
+        // O Java do Pojav se identifica como "25.0.x-internal" e o Paper recusa builds que não são GA;
+        // essa propriedade (do próprio Paper) pula só essa checagem de versão.
+        // No Android não existe /tmp gravável: o JNA (usado pelo Paper) e o Java usam esta pasta.
+        if cfg!(target_os = "android") {
+            let tmp = dir.join(".tmp");
+            let _ = std::fs::create_dir_all(&tmp);
+            cmd.arg("-DPaper.IgnoreJavaVersion=true")
+                .arg(format!("-Djava.io.tmpdir={}", tmp.display()))
+                .arg(format!("-Djna.tmpdir={}", tmp.display()));
+        }
+        cmd.args(req.jvm_args.iter().filter(|a| !a.trim().is_empty()))
+            .args(&target)
+            .arg("nogui");
+        (cmd, format!("Iniciando o servidor com {mem} MB de RAM…"), |line| {
+            line.contains("Done (") && line.contains(")! For help")
+        })
+    };
+
+    cmd.current_dir(&dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -434,7 +545,7 @@ pub async fn server_start(app: AppHandle, state: State<'_, AppState>, req: Start
         fail(&msg);
         msg
     })?;
-    console(&app, &id, format!("Iniciando o servidor com {mem} MB de RAM…"));
+    console(&app, &id, started_msg);
 
     let stdin = child.stdin.take().ok_or("sem stdin")?;
     for pipe in [
@@ -444,8 +555,8 @@ pub async fn server_start(app: AppHandle, state: State<'_, AppState>, req: Start
     .into_iter()
     .flatten()
     {
-        pipe_to_console(&app, &id, pipe, |app, id, line| {
-            if line.contains("Done (") && line.contains(")! For help") {
+        pipe_to_console(&app, &id, pipe, move |app, id, line| {
+            if ready(line) {
                 emit_status(app, id, "running", None);
                 let app = app.clone();
                 tokio::spawn(async move { crate::tray::refresh(&app).await });
@@ -527,6 +638,77 @@ pub fn server_delete(app: AppHandle, server_id: String) -> Result<(), String> {
     std::fs::remove_dir_all(paths::server(&app, &server_id)?).map_err(|e| e.to_string())
 }
 
+/// Arquivos TOML de configuração editáveis pelo launcher (hoje só o do Pumpkin).
+const TOML_FILES: [&str; 1] = ["pumpkin.toml"];
+
+fn toml_path(app: &AppHandle, server_id: &str, file: &str) -> Result<std::path::PathBuf, String> {
+    if !TOML_FILES.contains(&file) {
+        return Err(format!("Arquivo de configuração desconhecido: {file}"));
+    }
+    Ok(paths::server(app, server_id)?.join(file))
+}
+
+/// Lê chaves por caminho pontilhado (`networking.java.motd`). Chaves ausentes ficam fora do mapa.
+pub fn toml_get(text: &str, keys: &[String]) -> BTreeMap<String, serde_json::Value> {
+    let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else { return BTreeMap::new() };
+    let mut out = BTreeMap::new();
+    for key in keys {
+        let mut item: Option<&toml_edit::Item> = Some(doc.as_item());
+        for part in key.split('.') {
+            item = item.and_then(|i| i.get(part));
+        }
+        let value = match item.and_then(toml_edit::Item::as_value) {
+            Some(toml_edit::Value::String(v)) => serde_json::Value::from(v.value().as_str()),
+            Some(toml_edit::Value::Integer(v)) => serde_json::Value::from(*v.value()),
+            Some(toml_edit::Value::Float(v)) => serde_json::Value::from(*v.value()),
+            Some(toml_edit::Value::Boolean(v)) => serde_json::Value::from(*v.value()),
+            _ => continue,
+        };
+        out.insert(key.clone(), value);
+    }
+    out
+}
+
+/// Grava só as chaves enviadas, criando as tabelas que faltarem e preservando o resto do arquivo.
+pub fn toml_set(text: &str, values: &BTreeMap<String, serde_json::Value>) -> Result<String, String> {
+    let mut doc = text.parse::<toml_edit::DocumentMut>().map_err(|e| format!("TOML inválido: {e}"))?;
+    for (key, value) in values {
+        let parts: Vec<&str> = key.split('.').collect();
+        let (last, tables) = parts.split_last().ok_or("chave vazia")?;
+        let mut table = doc.as_table_mut();
+        for part in tables {
+            let entry = table.entry(part).or_insert_with(|| {
+                let mut t = toml_edit::Table::new();
+                t.set_implicit(true);
+                toml_edit::Item::Table(t)
+            });
+            table = entry.as_table_mut().ok_or_else(|| format!("{key}: {part} não é uma tabela"))?;
+        }
+        let new = match value {
+            serde_json::Value::String(v) => toml_edit::value(v.as_str()),
+            serde_json::Value::Bool(v) => toml_edit::value(*v),
+            serde_json::Value::Number(n) if n.is_i64() => toml_edit::value(n.as_i64().unwrap()),
+            serde_json::Value::Number(n) => toml_edit::value(n.as_f64().unwrap_or(0.0)),
+            other => return Err(format!("{key}: valor não suportado ({other})")),
+        };
+        table.insert(last, new);
+    }
+    Ok(doc.to_string())
+}
+
+#[tauri::command]
+pub fn server_toml_read(app: AppHandle, server_id: String, file: String, keys: Vec<String>) -> Result<BTreeMap<String, serde_json::Value>, String> {
+    let text = std::fs::read_to_string(toml_path(&app, &server_id, &file)?).unwrap_or_default();
+    Ok(toml_get(&text, &keys))
+}
+
+#[tauri::command]
+pub fn server_toml_write(app: AppHandle, server_id: String, file: String, values: BTreeMap<String, serde_json::Value>) -> Result<(), String> {
+    let path = toml_path(&app, &server_id, &file)?;
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    std::fs::write(&path, toml_set(&text, &values)?).map_err(|e| e.to_string())
+}
+
 /// IPs locais para mostrar "Conecte em 192.168.x.x:25565" para quem está na mesma rede.
 #[tauri::command]
 pub fn local_ips() -> Vec<String> {
@@ -579,5 +761,30 @@ mod tests {
         let out = update_properties("", &v);
         assert!(out.contains("motd=Linha 1\\nLinha 2\n"));
         assert_eq!(parse_properties(&out)["motd"], "Linha 1\nLinha 2");
+    }
+
+    #[test]
+    fn toml_reads_and_writes_dotted_keys_preserving_the_rest() {
+        let text = "# cfg\nseed = \"1\"\n\n[networking.java]\nmotd = \"old\" # keep\nmax_players = 1000\n";
+        let mut v = BTreeMap::new();
+        v.insert("networking.java.motd".to_string(), serde_json::json!("Tropicalia"));
+        v.insert("networking.java.online_mode".to_string(), serde_json::json!(false));
+        v.insert("networking.bedrock.enabled".to_string(), serde_json::json!(false));
+        v.insert("white_list".to_string(), serde_json::json!(true));
+        let out = toml_set(text, &v).unwrap();
+        assert!(out.starts_with("# cfg\nseed = \"1\"\n"));
+        assert!(out.contains("max_players = 1000"));
+        let keys: Vec<String> = ["networking.java.motd", "networking.java.online_mode", "networking.bedrock.enabled", "white_list", "networking.java.max_players", "missing.key"]
+            .iter().map(|k| k.to_string()).collect();
+        let got = toml_get(&out, &keys);
+        assert_eq!(got["networking.java.motd"], "Tropicalia");
+        assert_eq!(got["networking.java.online_mode"], false);
+        assert_eq!(got["networking.bedrock.enabled"], false);
+        assert_eq!(got["white_list"], true);
+        assert_eq!(got["networking.java.max_players"], 1000);
+        assert!(!got.contains_key("missing.key"));
+        // arquivo ainda inexistente: cria só o que foi pedido
+        let fresh = toml_set("", &v).unwrap();
+        assert_eq!(toml_get(&fresh, &keys)["networking.java.motd"], "Tropicalia");
     }
 }

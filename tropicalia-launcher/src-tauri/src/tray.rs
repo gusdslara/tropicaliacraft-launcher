@@ -27,8 +27,43 @@ pub fn show_main(app: &AppHandle) {
     }
 }
 
+/// No Linux a bandeja depende da libayatana-appindicator (ou libappindicator), que nem toda distro
+/// instala. Sem ela a criação do ícone dá panic e o launcher não abre: checamos antes e seguimos sem bandeja.
+#[cfg(target_os = "linux")]
+fn tray_supported() -> bool {
+    ["libayatana-appindicator3.so.1", "libappindicator3.so.1", "libayatana-appindicator3.so", "libappindicator3.so"]
+        .iter()
+        .any(|name| unsafe { libloading::Library::new(name) }.is_ok())
+}
+
+#[cfg(all(desktop, not(target_os = "linux")))]
+fn tray_supported() -> bool {
+    true
+}
+
+/// Existe ícone na bandeja para trazer a janela de volta depois de escondida?
+pub fn available(app: &AppHandle) -> bool {
+    app.state::<AppState>().tray.lock().map(|t| t.is_some()).unwrap_or(false)
+}
+
+/// Tira a janela da frente: esconde na bandeja ou, sem bandeja, só minimiza (senão ela sumiria de vez).
+pub fn hide_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        if available(app) {
+            let _ = w.hide();
+        } else {
+            #[cfg(desktop)]
+            let _ = w.minimize();
+        }
+    }
+}
+
 #[cfg(desktop)]
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
+    if !tray_supported() {
+        eprintln!("Bandeja indisponível (instale libayatana-appindicator); o launcher segue sem ícone de bandeja.");
+        return Ok(());
+    }
     use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 

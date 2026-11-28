@@ -1,4 +1,4 @@
-// Ponte com o Tauri. No navegador (npm run dev sem Tauri) cai para fetch/localStorage
+// Ponte com o Tauri. No navegador (bun run dev sem Tauri) cai para fetch/localStorage
 // para dar para mexer na interface sem compilar o Rust.
 import type { UnlistenFn } from '@tauri-apps/api/event';
 

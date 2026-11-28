@@ -16,7 +16,7 @@ $env:CFLAGS_aarch64_linux_android = "--target=aarch64-linux-android34"
 
 Write-Host "0/4 Compilando frontend SvelteKit (build estático com adapter-static)..."
 Set-Location "$PSScriptRoot\.."
-& npm.cmd run build
+& bun run build
 
 Write-Host "1/4 Compilando libtropicalia_launcher_lib.so (Rust aarch64 RELEASE) com alinhamento 16KB..."
 Set-Location "$PSScriptRoot\..\src-tauri"

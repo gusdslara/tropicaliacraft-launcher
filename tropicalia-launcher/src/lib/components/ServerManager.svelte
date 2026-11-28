@@ -1,5 +1,5 @@
-<!-- Central "Criar servidor": transforma o aparelho em servidor Vanilla, Paper, Purpur, Folia, Fabric, Forge, NeoForge
-     ou híbrido (Magma/Mohist/Arclight), com console, server.properties, whitelist, mods e plugins da Modrinth. -->
+<!-- Central "Criar servidor": transforma o aparelho em servidor Vanilla, Paper, Purpur, Folia, Fabric, Forge, NeoForge,
+     híbrido (Magma/Mohist/Arclight) ou Rust (Pumpkin), com console, configurações, whitelist, mods e plugins da Modrinth. -->
 <script lang="ts">
 	import TropicaliaCard from '$lib/components/TropicaliaCard.svelte';
 	import PixelButton from '$lib/components/PixelButton.svelte';
@@ -12,13 +12,14 @@
 	import ContentPickerInline from '$lib/components/ContentPickerInline.svelte';
 	import ServerSettings from '$lib/components/ServerSettings.svelte';
 	import ServerAccess from '$lib/components/ServerAccess.svelte';
+	import PumpkinSettings from '$lib/components/PumpkinSettings.svelte';
 	import { app, stageLabel, toasts } from '$lib/state.svelte';
 	import { call, isTauri, openFolder, openUrl } from '$lib/platform';
-	import { ENGINES, engine, engineVersions, type EngineInfo } from '$lib/services/server-engines';
+	import { ENGINES, PUMPKIN_ADDRESS_KEY, engine, engineVersions, pumpkinPort, pumpkinSupported, type EngineInfo } from '$lib/services/server-engines';
 	import { installProjectsBatch, loadersFor, type SearchHit } from '$lib/services/modrinth';
 	import type { LocalServer, ModLoader, ServerEngine, ServerStatus } from '$lib/types';
 	import { errorMessage, formatBytes } from '$lib/util/format';
-	import { Blocks, Check, Copy, Cpu, Download, FolderOpen, Globe, Layers, Package, Play, Plus, Power, Puzzle, RotateCw, Smartphone, Square, Trash2, Users, Wifi, X } from 'lucide-svelte';
+	import { Blocks, Check, Copy, Cpu, Download, Zap, FolderOpen, Globe, Layers, Monitor, Package, Play, Plus, Power, Puzzle, RotateCw, Smartphone, Square, Trash2, Users, Wifi, X } from 'lucide-svelte';
 
 	let { initialId }: { initialId?: string | null } = $props();
 	let chosenId = $state<string | undefined>(undefined);
@@ -58,6 +59,7 @@
 	let wJar = $state('');
 	let versions = $state<string[]>([]);
 	let versionsState = $state<'idle' | 'loading' | 'error'>('idle');
+	let versionsError = $state('');
 	let creating = $state(false);
 
 	// Abas e listas separadas de mods e plugins no wizard de criação
@@ -69,6 +71,19 @@
 	let addServerInlineOpen = $state(false);
 
 	const wInfo = $derived(engine(wEngine));
+	const isAndroid = $derived(app.system.os === 'android');
+	/** O Pumpkin só aparece onde existe executável dele (Windows, Linux, Mac ARM e Android arm64). */
+	const rustOk = $derived(pumpkinSupported(app.system));
+	const availableEngines = $derived(ENGINES.filter((e) => !e.native || rustOk));
+
+	const CATEGORY_LABEL: Record<EngineInfo['category'], string> = {
+		vanilla: 'Vanilla',
+		plugins: 'Plugins',
+		mods: 'Mods',
+		hybrid: 'Híbrido: mods + plugins',
+		rust: 'Rust · sem Java'
+	};
+	const CATEGORY_TONE = { vanilla: 'muted', plugins: 'blue', mods: 'green', hybrid: 'purple', rust: 'gold' } as const;
 	const wServerModLoader = $derived.by(() => {
 		const f = wInfo.flavors?.find((x) => x.id === wFlavor);
 		return (f?.modLoader ?? wInfo.modLoader ?? 'fabric') as ModLoader;
@@ -79,6 +94,7 @@
 		const f = wFlavor;
 		if (!wizardOpen) return;
 		versionsState = 'loading';
+		versionsError = '';
 		versions = [];
 		engineVersions(e, engine(e).flavors ? f : undefined)
 			.then((v) => {
@@ -87,12 +103,16 @@
 				wVersion = v[0] ?? '';
 				versionsState = 'idle';
 			})
-			.catch(() => (versionsState = 'error'));
+			.catch((err) => {
+				if (e !== wEngine) return;
+				versionsError = errorMessage(err);
+				versionsState = 'error';
+			});
 	});
 
 	function pickCategory(c: EngineInfo['category']) {
 		category = c;
-		wEngine = (ENGINES.find((e) => e.category === c && e.recommended) ?? ENGINES.find((e) => e.category === c)!).id;
+		wEngine = (availableEngines.find((e) => e.category === c && e.recommended) ?? availableEngines.find((e) => e.category === c)!).id;
 		wActiveTab = 'config';
 		wSelectedMods = [];
 		wSelectedPlugins = [];
@@ -108,7 +128,7 @@
 				flavor: wInfo.flavors ? wFlavor : undefined,
 				minecraftVersion: wVersion.trim(),
 				memoryMb: wMemory,
-				eulaAccepted: wEula,
+				eulaAccepted: wEula || !!wInfo.native,
 				customJarUrl: wJar.trim() || undefined
 			});
 
@@ -158,10 +178,18 @@
 
 	// ---------------------------------------------------------------- porta (endereço da LAN)
 	let serverPort = $state('25565');
+	let portRefresh = $state(0);
 	$effect(() => {
 		const s = srv;
 		void tab; // relê depois de salvar nas Configurações
+		void portRefresh;
 		if (!s || !isTauri) return;
+		if (engine(s.engine).native) {
+			call<Record<string, unknown>>('server_toml_read', { serverId: s.id, file: 'pumpkin.toml', keys: [PUMPKIN_ADDRESS_KEY] })
+				.then((p) => (serverPort = pumpkinPort(p[PUMPKIN_ADDRESS_KEY])))
+				.catch(() => {});
+			return;
+		}
 		call<Record<string, string>>('server_read_properties', { serverId: s.id })
 			.then((p) => (serverPort = p['server-port'] || '25565'))
 			.catch(() => {});
@@ -252,7 +280,7 @@
 	const detailTabs = $derived([
 		{ id: 'console', label: 'Console' },
 		{ id: 'props', label: 'Configurações' },
-		{ id: 'access', label: 'Whitelist & OPs' },
+		...(info?.native ? [] : [{ id: 'access', label: 'Whitelist & OPs' }]),
 		...(info?.accepts.includes('plugin') ? [{ id: 'plugins', label: 'Plugins', count: Object.values(srv?.content ?? {}).filter((c) => c.kind === 'plugin').length }] : []),
 		...(info?.accepts.includes('mod') ? [{ id: 'mods', label: 'Mods', count: Object.values(srv?.content ?? {}).filter((c) => c.kind === 'mod').length }] : []),
 		{ id: 'friends', label: 'Jogar com amigos' }
@@ -295,11 +323,9 @@
 							<h1 class="font-mc mc-shadow truncate text-[18px] sm:text-[20px] text-white" title={srv.name}>{srv.name}</h1>
 							<div class="mt-1.5 flex flex-wrap gap-1.5">
 								<Badge tone={statusTone(status)} pixel>{STATUS_LABEL[status]}</Badge>
-								<Badge tone={info.category === 'hybrid' ? 'purple' : info.category === 'plugins' ? 'blue' : info.category === 'vanilla' ? 'muted' : 'green'}>
-									{info.category === 'hybrid' ? 'Híbrido: mods + plugins' : info.category === 'plugins' ? 'Plugins' : info.category === 'vanilla' ? 'Vanilla' : 'Mods'}
-								</Badge>
+								<Badge tone={CATEGORY_TONE[info.category]}>{CATEGORY_LABEL[info.category]}</Badge>
 								<Badge>{srv.engineLabel ?? `${info.name} ${srv.minecraftVersion}`}</Badge>
-								<Badge>{(srv.memoryMb / 1024).toFixed(1)} GB</Badge>
+								{#if !info.native}<Badge>{(srv.memoryMb / 1024).toFixed(1)} GB</Badge>{/if}
 								{#if status === 'running'}<Badge tone="green"><Users size={11} /> {(app.serverPlayers[srv.id] ?? []).length} online</Badge>{/if}
 							</div>
 						</div>
@@ -319,16 +345,20 @@
 
 				<div class="mt-4 tp-divider"></div>
 				<div class="mt-4 flex flex-wrap items-center gap-x-8 gap-y-3">
-					<Toggle
-						checked={srv.eulaAccepted}
-						label="Aceito a EULA do Minecraft"
-						help="Obrigatório para o servidor iniciar"
-						onchange={(v) => {
-							app.updateServer(srv.id, { eulaAccepted: v });
-							if (isTauri) call('server_set_eula', { serverId: srv.id, accepted: v }).catch(toasts.err);
-						}}
-					/>
-					<button class="tp-muted text-[12px] underline" onclick={() => openUrl('https://aka.ms/MinecraftEULA')}>Ler a EULA</button>
+					{#if info.native}
+						<p class="tp-muted flex items-center gap-2 text-[12.5px]"><Zap size={14} class="text-[#fbbf24]" /> Servidor nativo em Rust: não usa Java nem o servidor da Mojang.</p>
+					{:else}
+						<Toggle
+							checked={srv.eulaAccepted}
+							label="Aceito a EULA do Minecraft"
+							help="Obrigatório para o servidor iniciar"
+							onchange={(v) => {
+								app.updateServer(srv.id, { eulaAccepted: v });
+								if (isTauri) call('server_set_eula', { serverId: srv.id, accepted: v }).catch(toasts.err);
+							}}
+						/>
+						<button class="tp-muted text-[12px] underline" onclick={() => openUrl('https://aka.ms/MinecraftEULA')}>Ler a EULA</button>
+					{/if}
 					{#if ips[0]}
 						<button class="addr ml-auto" onclick={() => copy(`${ips[0]}:${port}`)} title="Copiar endereço da rede local">
 							<Wifi size={14} /> <span class="font-mono">{ips[0]}:{port}</span> <Copy size={13} />
@@ -358,6 +388,8 @@
 						</div>
 					</TropicaliaCard>
 				{/if}
+			{:else if tab === 'props' && info.native}
+				<PumpkinSettings {srv} {live} onrestart={status === 'running' ? restart : undefined} onsaved={() => portRefresh++} />
 			{:else if tab === 'props'}
 				<ServerSettings {srv} {live} onrestart={status === 'running' ? restart : undefined} />
 			{:else if tab === 'access'}
@@ -429,7 +461,7 @@
 						</button>
 						<p class="tp-help mt-3">
 							Amigos com conta pirata/offline? Desligue o <button class="underline" onclick={() => (tab = 'props')}>online mode nas Configurações</button>
-							e use a <button class="underline" onclick={() => (tab = 'access')}>whitelist</button> para controlar quem entra.
+							e use a {#if info.native}whitelist (<code>whitelist add Nick</code> no console){:else}<button class="underline" onclick={() => (tab = 'access')}>whitelist</button>{/if} para controlar quem entra.
 						</p>
 					</TropicaliaCard>
 					<TropicaliaCard title="Pela internet (sem abrir portas)">
@@ -449,7 +481,7 @@
 	{:else}
 		<TropicaliaCard size="lg" class="create-hero">
 			<div class="flex flex-col items-center gap-5 py-8 text-center">
-				<div class="hero-icon"><Smartphone size={40} /></div>
+				<div class="hero-icon">{#if isAndroid}<Smartphone size={40} />{:else}<Monitor size={40} />{/if}</div>
 				<div>
 					<p class="font-mc text-[11px] tracking-[0.2em] text-[#4ade80]">{isTauri && app.system.os === 'android' ? 'SEU CELULAR VIRA SERVIDOR' : 'SEU PC VIRA SERVIDOR'}</p>
 					<h2 class="font-mc mc-shadow mt-2 text-[18px] sm:text-[22px] text-white">Crie seu servidor de Minecraft</h2>
@@ -457,12 +489,13 @@
 						Escolha o motor, a versão e já instale mods e plugins da Modrinth. Os amigos na mesma rede entram pelo IP que aparece aqui, e ele já aparece na sua lista de Servidores.
 					</p>
 				</div>
-				<div class="grid w-full max-w-[640px] grid-cols-2 sm:grid-cols-4 gap-2">
+				<div class="grid w-full max-w-[800px] grid-cols-2 {rustOk ? 'sm:grid-cols-5' : 'sm:grid-cols-4'} gap-2">
 					{#each [
 						{ icon: Blocks, t: 'Vanilla', d: 'Oficial Mojang' },
 						{ icon: Package, t: 'Plugins', d: 'Paper · Purpur · Folia' },
 						{ icon: Puzzle, t: 'Mods', d: 'Fabric · Forge · NeoForge' },
-						{ icon: Layers, t: 'Híbrido', d: 'Mods + plugins' }
+						{ icon: Layers, t: 'Híbrido', d: 'Mods + plugins' },
+						...(rustOk ? [{ icon: Zap, t: 'Rust', d: 'Pumpkin · sem Java' }] : [])
 					] as f (f.t)}
 						{@const Icon = f.icon}
 						<div class="tp-slot flex flex-col items-center gap-1 p-3">
@@ -488,7 +521,8 @@
 				{ c: 'vanilla', icon: Blocks, t: 'Vanilla', d: 'O servidor oficial da Mojang, puro, em qualquer versão.' },
 				{ c: 'plugins', icon: Package, t: 'Plugins', d: 'Paper, Purpur ou Folia: o mais leve e estável para survival e minigames com plugins.' },
 				{ c: 'mods', icon: Puzzle, t: 'Mods', d: 'Fabric, Forge ou NeoForge: modpacks, Create, performance e conteúdo novo.' },
-				{ c: 'hybrid', icon: Layers, t: 'Híbrido (mods + plugins)', d: 'Magma, Mohist ou Arclight: Create, Mekanism… junto com LuckPerms, EssentialsX.' }
+				{ c: 'hybrid', icon: Layers, t: 'Híbrido (mods + plugins)', d: 'Magma, Mohist ou Arclight: Create, Mekanism… junto com LuckPerms, EssentialsX.' },
+				...(rustOk ? [{ c: 'rust', icon: Zap, t: 'Rust (Pumpkin)', d: 'Servidor escrito em Rust, sem Java: abre em segundos e usa pouca RAM. Ainda em desenvolvimento.' }] : [])
 			] as o (o.c)}
 				{@const Icon = o.icon}
 				<button class="choice row" onclick={() => pickCategory(o.c as EngineInfo['category'])}>
@@ -505,7 +539,7 @@
 			<!-- Seletor entre Configuração do Motor e Seleção de Mods/Plugins -->
 			<div class="flex items-center justify-between gap-3 border-b border-[#24322b] pb-2 flex-wrap">
 				<TabSelector
-					tabs={category === 'vanilla' ? [{ id: 'config', label: 'Motor & Versão' }] : [
+					tabs={category === 'vanilla' || category === 'rust' ? [{ id: 'config', label: 'Motor & Versão' }] : [
 						{ id: 'config', label: '1. Motor & Versão' },
 						{
 							id: 'addons',
@@ -536,7 +570,7 @@
 					<div>
 						<span class="tp-label">Motor</span>
 						<div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-							{#each ENGINES.filter((e) => e.category === category) as e (e.id)}
+							{#each availableEngines.filter((e) => e.category === category) as e (e.id)}
 								<button class="choice sm" class:on={wEngine === e.id} onclick={() => (wEngine = e.id)}>
 									<b class="font-mc mc-shadow-sm flex items-center gap-1.5 text-[12px] text-white">{e.name}{#if e.recommended}<Badge tone="green">recomendado</Badge>{/if}</b>
 									<small>{e.tagline}</small>
@@ -559,6 +593,9 @@
 							<label class="tp-label" for="w-ver">Versão do Minecraft</label>
 							{#if versionsState === 'error' || (versionsState === 'idle' && !versions.length)}
 								<input id="w-ver" class="tp-input font-mono" bind:value={wVersion} placeholder="1.21.1" />
+								{#if versionsError}
+									<p class="tp-help" role="alert">Não deu para listar as versões ({versionsError}). Digite a versão manualmente.</p>
+								{/if}
 							{:else}
 								<select id="w-ver" class="tp-select" bind:value={wVersion} disabled={versionsState === 'loading'}>
 									{#if versionsState === 'loading'}<option>Carregando…</option>{/if}
@@ -567,25 +604,40 @@
 							{/if}
 						</div>
 					</div>
-					<div>
-						<div class="flex items-baseline justify-between">
-							<label class="tp-label" for="w-ram">RAM do servidor</label>
-							<span class="font-mc mc-shadow-sm text-[12px] text-[#bef264]">{(wMemory / 1024).toFixed(1)} GB</span>
+					{#if wInfo.native}
+						<div class="tp-slot flex items-start gap-3 p-3">
+							<Zap size={18} class="mt-0.5 shrink-0 text-[#fbbf24]" />
+							<p class="text-[12.5px] leading-relaxed text-[#c7d5cc]">
+								O Pumpkin é um servidor novo, feito do zero em Rust: não precisa de Java nem de EULA e aceita o Minecraft {wVersion || '26.3'} (o mesmo do perfil Rust).
+								Ainda está em desenvolvimento: parte do vanilla e os plugins Bukkit/Paper não existem nele.
+							</p>
 						</div>
-						<input id="w-ram" type="range" class="tp-range" min="1024" max={Math.max(2048, app.system.totalMemoryMb - 2048)} step="512" bind:value={wMemory} />
-					</div>
-					<details class="tp-slot p-3" open={wInfo.bestEffort}>
-						<summary class="cursor-pointer text-[12.5px] font-semibold text-[#c7d5cc]">URL manual do JAR (avançado)</summary>
-						<input class="tp-input mt-3 font-mono" placeholder="https://…/servidor.jar" bind:value={wJar} />
-						<p class="tp-help">
-							{wInfo.bestEffort
-								? `A API de download do ${wInfo.name} muda com frequência. Se a instalação automática falhar, cole aqui o link do JAR de ${wInfo.site}.`
-								: 'Deixe vazio para baixar automaticamente da API oficial.'}
-						</p>
-					</details>
-					<Toggle bind:checked={wEula} label="Aceito a EULA do Minecraft (aka.ms/MinecraftEULA)" />
+						<details class="tp-slot p-3">
+							<summary class="cursor-pointer text-[12.5px] font-semibold text-[#c7d5cc]">URL manual do executável (avançado)</summary>
+							<input class="tp-input mt-3 font-mono" placeholder="https://…/pumpkin" bind:value={wJar} />
+							<p class="tp-help">Deixe vazio para baixar o release oficial do GitHub, conferido por SHA-256.</p>
+						</details>
+					{:else}
+						<div>
+							<div class="flex items-baseline justify-between">
+								<label class="tp-label" for="w-ram">RAM do servidor</label>
+								<span class="font-mc mc-shadow-sm text-[12px] text-[#bef264]">{(wMemory / 1024).toFixed(1)} GB</span>
+							</div>
+							<input id="w-ram" type="range" class="tp-range" min="1024" max={Math.max(2048, app.system.totalMemoryMb - 2048)} step="512" bind:value={wMemory} />
+						</div>
+						<details class="tp-slot p-3" open={wInfo.bestEffort}>
+							<summary class="cursor-pointer text-[12.5px] font-semibold text-[#c7d5cc]">URL manual do JAR (avançado)</summary>
+							<input class="tp-input mt-3 font-mono" placeholder="https://…/servidor.jar" bind:value={wJar} />
+							<p class="tp-help">
+								{wInfo.bestEffort
+									? `A API de download do ${wInfo.name} muda com frequência. Se a instalação automática falhar, cole aqui o link do JAR de ${wInfo.site}.`
+									: 'Deixe vazio para baixar automaticamente da API oficial.'}
+							</p>
+						</details>
+						<Toggle bind:checked={wEula} label="Aceito a EULA do Minecraft (aka.ms/MinecraftEULA)" />
+					{/if}
 
-					<div class="pt-2 flex justify-end" class:hidden={category === 'vanilla'}>
+					<div class="pt-2 flex justify-end" class:hidden={category === 'vanilla' || category === 'rust'}>
 						<PixelButton variant="gold" icon={Puzzle} onclick={() => (wActiveTab = 'addons')}>
 							Avançar para escolha de mods e plugins →
 						</PixelButton>
@@ -670,7 +722,7 @@
 				variant="emerald"
 				icon={Power}
 				loading={creating}
-				disabled={!wVersion || !wEula}
+				disabled={!wVersion || (!wEula && !wInfo.native)}
 				onclick={createServer}
 			>
 				{#if category === 'hybrid' && (wSelectedMods.length > 0 || wSelectedPlugins.length > 0)}
@@ -732,6 +784,7 @@
 	.engine-badge.plugins { background: linear-gradient(#2563eb, #1e40af); }
 	.engine-badge.mods { background: linear-gradient(#16a34a, #15803d); }
 	.engine-badge.vanilla { background: linear-gradient(#78716c, #44403c); }
+	.engine-badge.rust { background: linear-gradient(#d97706, #9a3412); }
 	.choice.row { flex-direction: row; align-items: center; gap: 14px; }
 	.choice-icon {
 		display: grid;
@@ -746,6 +799,7 @@
 	.choice-icon.plugins { background: linear-gradient(#2563eb, #1e40af); }
 	.choice-icon.mods { background: linear-gradient(#16a34a, #15803d); }
 	.choice-icon.hybrid { background: linear-gradient(135deg, #7e22ce, #15803d); }
+	.choice-icon.rust { background: linear-gradient(#d97706, #9a3412); }
 	.hero-icon {
 		display: grid;
 		place-items: center;
