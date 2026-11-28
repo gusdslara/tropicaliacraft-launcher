@@ -180,7 +180,8 @@ if not ndk:
     if not candidates:
         raise RuntimeError('Set NDK_HOME to an installed Android NDK.')
     ndk = max(candidates, key=lambda p: tuple(int(n) for n in p.name.split('.')))
-clang = Path(ndk) / 'toolchains/llvm/prebuilt/windows-x86_64/bin/clang.exe'
+_host = {'win32': 'windows-x86_64', 'darwin': 'darwin-x86_64'}.get(__import__('sys').platform, 'linux-x86_64')
+clang = Path(ndk) / f"toolchains/llvm/prebuilt/{_host}/bin/clang{'.exe' if _host.startswith('windows') else ''}"
 subprocess.run([str(clang), '--target=aarch64-linux-android24', '-fPIE', '-pie',
                 '-Wl,-z,max-page-size=16384', str(native_source), '-ldl', '-llog',
                 '-o', str(app / 'src/main/jniLibs/arm64-v8a/libjava_exec.so')], check=True)

@@ -73,6 +73,19 @@ android {
             keyAlias "android_github_release"
             keyPassword System.getenv("POJAV_KEYSTORE_PASSWORD")
         }
+        // TropicaliaCraft release key: kept outside the repository. Point TROPICALIA_SIGNING_PROPERTIES
+        // at a properties file with storeFile, storePassword, keyAlias and keyPassword.
+        tropicaliaRelease {
+            def propsPath = System.getenv("TROPICALIA_SIGNING_PROPERTIES")
+            if (propsPath != null && new File(propsPath).isFile()) {
+                def props = new Properties()
+                new File(propsPath).withInputStream { props.load(it) }
+                storeFile file(props.getProperty("storeFile"))
+                storePassword props.getProperty("storePassword")
+                keyAlias props.getProperty("keyAlias")
+                keyPassword props.getProperty("keyPassword")
+            }
+        }
         googlePlayBuild {
             storeFile file("pojav_gplay.jks")
             storePassword System.getenv("POJAV_GPLAY_KEYSTORE_PASSWORD")
@@ -128,6 +141,15 @@ android {
             resValue "string", "app_short_name", "TropicaliaLauncher"
             resValue 'string', 'application_package', 'com.tropicaliacraft.launcher'
             resValue 'string', 'storageProviderAuthorities', 'com.tropicaliacraft.launcher.scoped.gamefolder'
+        }
+        // Public TropicaliaLauncher APK: same app as debug (package, names, providers), not debuggable,
+        // signed with the release key (see signingConfigs.tropicaliaRelease).
+        tropicalia {
+            initWith debug
+            debuggable false
+            jniDebuggable false
+            signingConfig signingConfigs.tropicaliaRelease
+            matchingFallbacks += List.of("debug")
         }
         proguard {
             initWith debug
