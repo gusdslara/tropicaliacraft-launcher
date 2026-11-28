@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 // Coloca o motor Horizon Rust do TropicaliaCraft dentro do instalador desktop (all-in-one, como o APK).
 //
-//   node scripts/stage-horizon.mjs --bin <pasta com horizon-client[.exe]> [--data <engine-data.zip>]
+//   node scripts/stage-horizon.mjs --bin <pasta com horizon-client[.exe]> [--data <engine-data.zip> | --no-data]
+//
+// Com --no-data (usado nos releases públicos) só o executável vai no instalador: o próprio
+// horizon-client baixa os recursos oficiais da Mojang no primeiro uso (--install-resources).
 //
 // Copia para src-tauri/resources/horizon/:
 //   - horizon-client(.exe) (+ DLLs/dylibs ao lado, se houver)
@@ -28,8 +31,9 @@ if (!existsSync(join(binDir, exe))) {
 	console.error(`Não achei ${exe} em ${binDir}. Compile o Horizon antes (tools/horizon-android).`);
 	process.exit(1);
 }
-if (!existsSync(data) || statSync(data).size < 1000) {
-	console.error(`Não achei o engine-data.zip em ${data}.`);
+const noData = args.includes('--no-data');
+if (!noData && (!existsSync(data) || statSync(data).size < 1000)) {
+	console.error(`Não achei o engine-data.zip em ${data}. Use --no-data para empacotar só o executável.`);
 	process.exit(1);
 }
 
@@ -39,6 +43,6 @@ copyFileSync(join(binDir, exe), join(out, exe));
 for (const f of readdirSync(binDir)) {
 	if (/\.(dll|dylib|so(\.\d+)*)$/i.test(f)) copyFileSync(join(binDir, f), join(out, f));
 }
-copyFileSync(data, join(out, 'engine-data.zip'));
+if (!noData) copyFileSync(data, join(out, 'engine-data.zip'));
 for (const f of readdirSync(out)) console.log(`  horizon/${f}  ${(statSync(join(out, f)).size / 1048576).toFixed(1)} MB`);
 console.log('Motor Horizon pronto para empacotar.');
