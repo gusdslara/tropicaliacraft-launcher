@@ -35,7 +35,15 @@ jobs:
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --draft --title "TropicaliaCraft Launcher $TAG" --notes-file notes.md --verify-tag
           fi
-          echo "id=$(gh api "repos/$GITHUB_REPOSITORY/releases" --jq ".[] | select(.tag_name==\"$TAG\") | .id" | head -1)" >> "$GITHUB_OUTPUT"
+          # The new draft can take a moment to show up; never let the build jobs run without an id
+          # (tauri-action would build and silently skip every upload).
+          for i in 1 2 3 4 5 6; do
+            id=$(gh release view "$TAG" --json databaseId --jq .databaseId 2>/dev/null || true)
+            [ -n "$id" ] && break
+            sleep 5
+          done
+          [ -n "$id" ] || { echo "::error::release $TAG not found"; exit 1; }
+          echo "id=$id" >> "$GITHUB_OUTPUT"
 
   desktop:
     needs: create-release
