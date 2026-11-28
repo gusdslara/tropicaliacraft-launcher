@@ -55,7 +55,8 @@ echo "5/5 Gradle (assembleFullTropicalia)"
 (cd "$engine" && ./gradlew :app_pojavlauncher:assembleFullTropicalia \
   -Pandroid.injected.build.abi=arm64-v8a --console=plain)
 
-apk="$(ls "$module"/build/outputs/apk/full/tropicalia/*.apk "$module"/build/intermediates/apk/full/tropicalia/*.apk 2>/dev/null | head -1)"
+apk="$(find "$module/build/outputs/apk/full/tropicalia" "$module/build/intermediates/apk/full/tropicalia" -name '*.apk' 2>/dev/null | head -1 || true)"
+[[ -n "$apk" ]] || { echo "APK not found" >&2; exit 1; }
 mkdir -p "$launcher/artifacts"
 out="$launcher/artifacts/TropicaliaLauncher-$version-android-arm64.apk"
 cp "$apk" "$out"
