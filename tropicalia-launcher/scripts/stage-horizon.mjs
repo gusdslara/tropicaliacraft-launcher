@@ -10,7 +10,7 @@
 //   - horizon-client(.exe) (+ DLLs/dylibs ao lado, se houver)
 //   - engine-data.zip (dados do motor, os mesmos do APK)
 // O tauri.<plataforma>.conf.json empacota essa pasta; o launcher instala a partir dela no primeiro uso.
-import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -39,6 +39,7 @@ if (!noData && (!existsSync(data) || statSync(data).size < 1000)) {
 
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
+writeFileSync(join(out, '.gitkeep'), ''); // a pasta é versionada vazia
 copyFileSync(join(binDir, exe), join(out, exe));
 for (const f of readdirSync(binDir)) {
 	if (/\.(dll|dylib|so(\.\d+)*)$/i.test(f)) copyFileSync(join(binDir, f), join(out, f));
