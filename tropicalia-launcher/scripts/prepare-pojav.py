@@ -3,14 +3,18 @@
 Does not publish an APK or install/uninstall anything on a device.
 """
 import argparse
+import hashlib
 import shutil
 import os
 import subprocess
+import urllib.request
 from pathlib import Path
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--engine', type=Path, required=True)
 parser.add_argument('--support', type=Path, required=True, help='Directory containing existing Tauri Android support jars')
+parser.add_argument('--skip-pumpkin', action='store_true',
+                    help='Do not bundle the Pumpkin (Rust) server; the app then downloads it on first use')
 args = parser.parse_args()
 launcher = Path(__file__).resolve().parents[1]
 engine = args.engine.resolve()
@@ -180,6 +184,39 @@ clang = Path(ndk) / 'toolchains/llvm/prebuilt/windows-x86_64/bin/clang.exe'
 subprocess.run([str(clang), '--target=aarch64-linux-android24', '-fPIE', '-pie',
                 '-Wl,-z,max-page-size=16384', str(native_source), '-ldl', '-llog',
                 '-o', str(app / 'src/main/jniLibs/arm64-v8a/libjava_exec.so')], check=True)
+
+# Pumpkin (servidor Minecraft em Rust): empacotado como o libjava_exec.so, porque o Android só executa
+# programas a partir da pasta de bibliotecas nativas do APK. Release oficial fixo, conferido por SHA-256
+# (o mesmo digest publicado pelo GitHub). Ao atualizar a versão, troque a tag e o hash juntos.
+PUMPKIN_TAG = '0.2.2+26.3-26.60'
+PUMPKIN_SHA256 = '77a0fc7f2ec01646b849524509043ba884a246a7687a838c78a7bfb40b171ab1'
+PUMPKIN_URL = ('https://github.com/Pumpkin-MC/Pumpkin/releases/download/'
+               + PUMPKIN_TAG.replace('+', '%2B') + '/pumpkin-aarch64-android')
+
+def sha256_of(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+pumpkin_target = app / 'src/main/jniLibs/arm64-v8a/libpumpkin.so'
+if args.skip_pumpkin:
+    pumpkin_target.unlink(missing_ok=True)
+elif not (pumpkin_target.is_file() and sha256_of(pumpkin_target) == PUMPKIN_SHA256):
+    cached = launcher / 'src-tauri/target' / f'pumpkin-aarch64-android-{PUMPKIN_SHA256[:12]}'
+    if not (cached.is_file() and sha256_of(cached) == PUMPKIN_SHA256):
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        print(f'Baixando Pumpkin {PUMPKIN_TAG} para Android (cerca de 125 MB)...')
+        partial = cached.with_suffix('.part')
+        urllib.request.urlretrieve(PUMPKIN_URL, partial)
+        got = sha256_of(partial)
+        if got != PUMPKIN_SHA256:
+            partial.unlink()
+            raise RuntimeError(f'Pumpkin: SHA-256 inesperado ({got}); o download foi descartado.')
+        partial.replace(cached)
+    pumpkin_target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(cached, pumpkin_target)
 
 gradle = app / 'build.gradle'
 patch(gradle, '    buildFeatures {', '''    androidResources {

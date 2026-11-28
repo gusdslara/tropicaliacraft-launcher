@@ -6,17 +6,17 @@ dos cards `.tp-card` (faixa de grama pixelada) da landing page.
 ## Rodar
 
 ```bash
-npm install
-npm run tauri dev      # app desktop (precisa de Rust + WebView2 no Windows)
-npm run dev            # só a interface no navegador (sem Rust: ações de jogo/servidor ficam desativadas)
-npm run tauri build    # instalador .msi/.exe (Windows), .deb/.AppImage (Linux), .dmg (macOS)
+bun install
+bun run tauri dev      # app desktop (precisa de Rust + WebView2 no Windows)
+bun run dev            # só a interface no navegador (sem Rust: ações de jogo/servidor ficam desativadas)
+bun run tauri build    # instalador .msi/.exe (Windows), .deb/.AppImage (Linux), .dmg (macOS)
 ```
 
 ### Publicar para Windows (downloads da landing page)
 
 ```powershell
-npm run publish:windows             # compila e copia para public/downloads/windows (e docs/)
-npm run publish:windows -- -SkipBuild
+bun run publish:windows             # compila e copia para public/downloads/windows (e docs/)
+bun run publish:windows -- -SkipBuild
 ```
 
 **Nunca publique só o `tropicalia-launcher.exe`.** Compilado com o Rust `windows-gnu` (MinGW), ele
@@ -52,11 +52,14 @@ Dados ficam em `%APPDATA%/com.tropicaliacraft.launcher/` (`shared/` = layout `.m
 - **Magma e Mohist**: as APIs de download mudam com frequência; se falhar, cole a URL do JAR no assistente. Arclight (GitHub), Paper (Fill v3 com fallback v2), Purpur e Fabric são resolvidos automaticamente.
 - **Túnel**: hoje o launcher mostra o IP da LAN e guia o uso do playit.gg; o agente integrado ainda não.
 - **Bedrock / Amethyst** e **Android** (serviço em primeiro plano + notificação) ainda não foram implementados.
-- O Rust foi validado com `cargo check`/`cargo test` no Linux; rode `npm run tauri dev` no Windows para o primeiro teste real de jogo.
+- **Servidor em Rust (Pumpkin)**: executável único do release oficial do GitHub (SHA-256 conferido), sem Java nem EULA; configurado pelo `pumpkin.toml`. No desktop é baixado na instalação do servidor. No Android (arm64) vai dentro do APK como `libpumpkin.so` (`scripts/prepare-pojav.py`, igual ao `libjava_exec.so`); com `build-pojav.ps1 -SkipPumpkin` o APK fica ~125 MB menor e o app baixa o binário e o executa pelo `/system/bin/linker64`. Sem build para Mac Intel.
+- **Linux**: a bandeja usa `libayatana-appindicator`; sem ela o launcher abre normalmente, só sem ícone de bandeja (a janela minimiza em vez de esconder).
+- **Versões do Tauri**: as versões menores de `@tauri-apps/*` (package.json) e dos crates `tauri*` (Cargo.toml) precisam bater; atualize os dois lados juntos.
+- Jogo Java (Fabric 1.20.1) e servidor Paper 26.3 foram testados de ponta a ponta no Linux; Windows e Android ainda precisam de um teste real depois destas mudanças.
 
 ## Testes
 
 ```bash
 cd src-tauri && cargo test     # caminhos maven, regras de SO, merge inheritsFrom, server.properties
-npx svelte-check               # tipos do frontend
+bunx svelte-check               # tipos do frontend
 ```

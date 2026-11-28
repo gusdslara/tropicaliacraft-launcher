@@ -168,7 +168,7 @@ export interface Instance {
 	playTimeMinutes: number;
 }
 
-export type ServerEngine = 'vanilla' | 'paper' | 'purpur' | 'folia' | 'fabric' | 'forge' | 'neoforge' | 'magma' | 'mohist' | 'arclight';
+export type ServerEngine = 'vanilla' | 'paper' | 'purpur' | 'folia' | 'fabric' | 'forge' | 'neoforge' | 'magma' | 'mohist' | 'arclight' | 'pumpkin';
 
 /** Servidor da lista "Servidores" da tela inicial (como a lista de multiplayer do jogo). */
 export interface SavedServer {

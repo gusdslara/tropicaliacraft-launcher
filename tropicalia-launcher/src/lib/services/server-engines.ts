@@ -5,7 +5,7 @@ import type { ServerEngine } from '$lib/types';
 export interface EngineInfo {
 	id: ServerEngine;
 	name: string;
-	category: 'vanilla' | 'plugins' | 'mods' | 'hybrid';
+	category: 'vanilla' | 'plugins' | 'mods' | 'hybrid' | 'rust';
 	tagline: string;
 	/** pastas que esse motor usa */
 	accepts: Array<'mod' | 'plugin'>;
@@ -19,6 +19,8 @@ export interface EngineInfo {
 	installer?: boolean;
 	/** destaque "recomendado" no card */
 	recommended?: boolean;
+	/** executável nativo (sem Java, sem EULA, sem server.properties): configurado pelo `pumpkin.toml` */
+	native?: boolean;
 }
 
 export const ENGINES: EngineInfo[] = [
@@ -117,6 +119,15 @@ export const ENGINES: EngineInfo[] = [
 		modLoader: 'forge',
 		bestEffort: true,
 		site: 'https://mohistmc.com'
+	},
+	{
+		id: 'pumpkin',
+		name: 'Pumpkin',
+		category: 'rust',
+		tagline: 'Servidor escrito em Rust: abre em segundos e usa pouca RAM, sem Java.',
+		accepts: [],
+		native: true,
+		site: 'https://pumpkinmc.org'
 	}
 ];
 
@@ -126,6 +137,13 @@ export interface ResolvedJar {
 	url: string;
 	label: string;
 	sha1?: string;
+	sha256?: string;
+}
+
+/** Sistema onde o servidor vai rodar (o Pumpkin publica um executável por plataforma). */
+export interface HostPlatform {
+	os: string;
+	arch: string;
 }
 
 // ------------------------------------------------------------------ versões por motor
@@ -136,7 +154,64 @@ const MOHIST_VERSIONS = ['1.20.1', '1.20.2', '1.19.4', '1.19.2', '1.18.2', '1.16
 interface GhRelease {
 	tag_name: string;
 	prerelease: boolean;
-	assets: Array<{ name: string; browser_download_url: string }>;
+	assets: Array<{ name: string; browser_download_url: string; digest?: string | null }>;
+}
+
+// ------------------------------------------------------------------ Pumpkin (Rust)
+
+const PUMPKIN_REPO = 'Pumpkin-MC/Pumpkin';
+/** Usado só se a API do GitHub estiver fora do ar ou no limite de requisições. */
+const PUMPKIN_FALLBACK_MC = '26.3';
+
+/** O Pumpkin tem executável para este sistema? (Android só arm64; sem Mac Intel.) */
+export const pumpkinSupported = (host: HostPlatform) => pumpkinAsset(host) !== null;
+
+/** Nome do executável publicado para cada sistema; `null` quando o Pumpkin não tem build. */
+export function pumpkinAsset(host: HostPlatform): string | null {
+	const arm = host.arch === 'aarch64' || host.arch === 'arm64';
+	const x64 = host.arch === 'x86_64';
+	if (host.os === 'windows') return arm ? 'pumpkin-ARM64-Windows.exe' : x64 ? 'pumpkin-X64-Windows.exe' : null;
+	if (host.os === 'linux') return arm ? 'pumpkin-ARM64-Linux' : x64 ? 'pumpkin-X64-Linux' : null;
+	if (host.os === 'macos') return arm ? 'pumpkin-ARM64-macOS' : null;
+	if (host.os === 'android') return arm ? 'pumpkin-aarch64-android' : null;
+	return null;
+}
+
+/** "0.2.2+26.3-26.60" → { pumpkin: "0.2.2", mc: "26.3" } (o sufixo é a versão Bedrock). */
+export function parsePumpkinTag(tag: string): { pumpkin: string; mc: string } | null {
+	const m = tag.match(/^v?(\d+\.\d+\.\d+)\+(\d+(?:\.\d+)+)(?:-|$)/);
+	return m ? { pumpkin: m[1], mc: m[2] } : null;
+}
+
+async function pumpkinReleases() {
+	const releases = await getJson<GhRelease[]>(`https://api.github.com/repos/${PUMPKIN_REPO}/releases?per_page=30`, {
+		headers: { Accept: 'application/vnd.github+json' }
+	});
+	return releases.flatMap((r) => {
+		const v = r.prerelease ? null : parsePumpkinTag(r.tag_name);
+		return v ? [{ ...v, assets: r.assets }] : [];
+	});
+}
+
+async function pumpkinJar(mc: string, host?: HostPlatform): Promise<ResolvedJar> {
+	if (!host) throw new Error('Sistema desconhecido: não deu para escolher o executável do Pumpkin.');
+	const asset = pumpkinAsset(host);
+	if (!asset) throw new Error(`O Pumpkin não publica executável para ${host.os} ${host.arch}.`);
+	// API do GitHub fora do ar ou no limite de requisições: cai para o link direto abaixo.
+	const releases = await pumpkinReleases().catch(() => null);
+	if (releases?.length) {
+		const release = releases.find((r) => r.mc === mc);
+		if (!release) throw new Error(`Nenhuma versão estável do Pumpkin para o Minecraft ${mc}.`);
+		const file = release.assets.find((a) => a.name === asset);
+		if (!file) throw new Error(`O Pumpkin ${release.pumpkin} não tem executável para ${host.os} ${host.arch}.`);
+		return {
+			url: file.browser_download_url,
+			sha256: file.digest?.startsWith('sha256:') ? file.digest.slice(7) : undefined,
+			label: `Pumpkin ${release.pumpkin} · Minecraft ${mc}`
+		};
+	}
+	// Sem a API: o GitHub redireciona `latest/download` para o último release estável.
+	return { url: `https://github.com/${PUMPKIN_REPO}/releases/latest/download/${asset}`, label: `Pumpkin · Minecraft ${mc}` };
 }
 
 async function arclightAssets() {
@@ -236,10 +311,14 @@ export async function engineVersions(id: ServerEngine, flavor?: string): Promise
 			return MAGMA_VERSIONS;
 		case 'mohist':
 			return MOHIST_VERSIONS;
+		case 'pumpkin': {
+			const list = await pumpkinReleases().catch(() => []);
+			return list.length ? sortVersions(list.map((r) => r.mc)) : [PUMPKIN_FALLBACK_MC];
+		}
 	}
 }
 
-export async function resolveJar(id: ServerEngine, mc: string, flavor?: string): Promise<ResolvedJar> {
+export async function resolveJar(id: ServerEngine, mc: string, flavor?: string, host?: HostPlatform): Promise<ResolvedJar> {
 	switch (id) {
 		case 'vanilla': {
 			const m = await mojangManifest();
@@ -321,8 +400,96 @@ export async function resolveJar(id: ServerEngine, mc: string, flavor?: string):
 				url: `https://api.magmafoundation.org/api/v2/${mc}/latest/download`,
 				label: `Magma ${mc} (última build)`
 			};
+		case 'pumpkin':
+			return pumpkinJar(mc, host);
 	}
 }
+
+// ------------------------------------------------------------------ pumpkin.toml
+
+export type TomlField =
+	| { key: string; label: string; type: 'text' | 'number'; help?: string; min?: number; max?: number }
+	| { key: string; label: string; type: 'bool'; help?: string }
+	| { key: string; label: string; type: 'select'; options: Array<[string, string]>; help?: string };
+
+/** Chave sintética: a porta fica dentro de `networking.java.address` ("0.0.0.0:25565"). */
+export const PUMPKIN_PORT_KEY = 'port';
+export const PUMPKIN_ADDRESS_KEY = 'networking.java.address';
+
+export const PUMPKIN_GROUPS: Array<{ id: string; title: string; fields: TomlField[] }> = [
+	{
+		id: 'access',
+		title: 'Acesso',
+		fields: [
+			{ key: 'networking.java.motd', label: 'Descrição (MOTD)', type: 'text' },
+			{ key: PUMPKIN_PORT_KEY, label: 'Porta', type: 'number', min: 1024, max: 65535, help: 'Padrão 25565.' },
+			{ key: 'networking.java.max_players', label: 'Máximo de jogadores', type: 'number', min: 1, max: 100000 },
+			{
+				key: 'networking.java.online_mode',
+				label: 'Online mode (só contas originais)',
+				type: 'bool',
+				help: 'Desligue para entrar com conta offline do launcher ou jogar em LAN.'
+			},
+			{ key: 'white_list', label: 'Whitelist ativa', type: 'bool', help: 'Adicione nomes pelo console: whitelist add Nick.' },
+			{
+				key: 'networking.bedrock.enabled',
+				label: 'Aceitar Minecraft Bedrock',
+				type: 'bool',
+				help: 'Usa a porta UDP 19132. Desligue se ela já estiver em uso, senão o servidor não inicia.'
+			}
+		]
+	},
+	{
+		id: 'game',
+		title: 'Jogo',
+		fields: [
+			{ key: 'default_gamemode', label: 'Modo de jogo padrão', type: 'select', options: [['Survival', 'Sobrevivência'], ['Creative', 'Criativo'], ['Adventure', 'Aventura'], ['Spectator', 'Espectador']] },
+			{ key: 'force_gamemode', label: 'Forçar modo ao entrar', type: 'bool' },
+			{ key: 'default_difficulty', label: 'Dificuldade', type: 'select', options: [['Peaceful', 'Pacífico'], ['Easy', 'Fácil'], ['Normal', 'Normal'], ['Hard', 'Difícil']] },
+			{ key: 'hardcore', label: 'Hardcore', type: 'bool' },
+			{ key: 'pvp.enabled', label: 'PvP', type: 'bool' },
+			{ key: 'allow_nether', label: 'Nether', type: 'bool' }
+		]
+	},
+	{
+		id: 'world',
+		title: 'Mundo e desempenho',
+		fields: [
+			{ key: 'default_level_name', label: 'Pasta do mundo', type: 'text' },
+			{ key: 'seed', label: 'Seed', type: 'text', help: 'Só vale para mundo novo. Vazio = aleatória.' },
+			{ key: 'networking.java.view_distance', label: 'Distância de visão (chunks)', type: 'number', min: 2, max: 64 },
+			{ key: 'networking.java.simulation_distance', label: 'Distância de simulação (chunks)', type: 'number', min: 2, max: 32 }
+		]
+	}
+];
+
+/** Padrões do Pumpkin para chaves que ainda não estão no arquivo (ele só é escrito na primeira execução). */
+export const PUMPKIN_DEFAULTS: Record<string, string | number | boolean> = {
+	'networking.java.motd': 'A blazingly fast Pumpkin server!',
+	[PUMPKIN_ADDRESS_KEY]: '0.0.0.0:25565',
+	'networking.java.max_players': 1000,
+	'networking.java.online_mode': true,
+	white_list: false,
+	'networking.bedrock.enabled': true,
+	default_gamemode: 'Survival',
+	force_gamemode: false,
+	default_difficulty: 'Normal',
+	hardcore: false,
+	'pvp.enabled': true,
+	allow_nether: true,
+	default_level_name: 'world',
+	seed: '',
+	'networking.java.view_distance': 16,
+	'networking.java.simulation_distance': 10
+};
+
+/** Valores gravados ao criar o servidor: nome do launcher no MOTD e um limite de jogadores caseiro. */
+export const PUMPKIN_INITIAL: Record<string, string | number | boolean> = {
+	'networking.java.motd': 'Servidor Tropicalia do launcher (Rust)',
+	'networking.java.max_players': 10
+};
+
+export const pumpkinPort = (address: unknown) => String(address ?? '').match(/:(\d+)$/)?.[1] ?? '25565';
 
 export type PropertyField =
 	| { key: string; label: string; type: 'text' | 'number'; help?: string; min?: number; max?: number; warn?: (v: string) => string | null }
