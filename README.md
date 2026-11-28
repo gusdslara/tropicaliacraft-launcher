@@ -80,8 +80,17 @@ bun run tauri build    # Windows .msi/.exe, Linux .deb/.AppImage, macOS .dmg
 Tests: `cd src-tauri && cargo test` and `bun run check`.
 
 **Android** builds the Tauri library, Horizon Android and the PojavLauncher Gradle project into
-one APK. See [`tropicalia-launcher/README.md`](tropicalia-launcher/README.md) and
-`tropicalia-launcher/scripts/build-pojav.ps1`.
+one APK. On Linux/macOS, with the Android SDK/NDK, JDK 17 and Rust:
+
+```bash
+TROPICALIA_SIGNING_PROPERTIES=/path/to/release.properties \
+TROPICALIA_SUPPORT=/path/to/tauri-android-support-jars \
+tropicalia-launcher/scripts/build-android-release.sh
+```
+
+`release.properties` holds `storeFile`, `storePassword`, `keyAlias` and `keyPassword` of your own
+key; the official key is never in this repository. On Windows, `scripts/build-pojav.ps1` builds a
+debug APK. See [`tropicalia-launcher/README.md`](tropicalia-launcher/README.md).
 
 **Releases** are built by [`.github/workflows/release.yml`](.github/workflows/release.yml) when a
 `v*` tag is pushed: Windows, Linux and macOS on GitHub Actions; the signed Android APK is built
