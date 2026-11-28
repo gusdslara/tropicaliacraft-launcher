@@ -1071,7 +1071,29 @@ const messages: Record<string, [string, string]> = {
   "Novo Perfil de Minecraft": [
     "New Minecraft profile",
     "Nuevo perfil de Minecraft"
-  ]
+  ],
+  "Voltar aos ajustes": ["Back to settings", "Volver a ajustes"],
+  "Launcher de código aberto para Minecraft no PC e no celular": ["Open-source Minecraft launcher for PC and mobile", "Launcher de código abierto para Minecraft en PC y móvil"],
+  "O TropicaliaLauncher junta dois jeitos de jogar num app só: o motor Horizon, escrito em Rust, e o runtime Java do PojavLauncher para rodar o Minecraft: Java Edition original no Android. Nada disso existiria sem os projetos abaixo.": ["TropicaliaLauncher brings two ways to play into one app: the Horizon engine, written in Rust, and the PojavLauncher Java runtime that runs the original Minecraft: Java Edition on Android. None of it would exist without the projects below.", "TropicaliaLauncher reúne dos formas de jugar en una sola app: el motor Horizon, escrito en Rust, y el runtime Java de PojavLauncher para ejecutar el Minecraft: Java Edition original en Android. Nada de esto existiría sin los proyectos de abajo."],
+  "Código-fonte": ["Source code", "Código fuente"],
+  "Avisos de terceiros": ["Third-party notices", "Avisos de terceros"],
+  "Licença (MIT)": ["License (MIT)", "Licencia (MIT)"],
+  "Motores e runtimes": ["Engines and runtimes", "Motores y runtimes"],
+  "Inclui modificações nossas. Código-fonte exato em": ["Includes our modifications. Exact source code in", "Incluye modificaciones nuestras. Código fuente exacto en"],
+  "Projeto": ["Project", "Proyecto"],
+  "Nosso código": ["Our code", "Nuestro código"],
+  "Licença": ["License", "Licencia"],
+  "Bibliotecas e serviços": ["Libraries and services", "Bibliotecas y servicios"],
+  "Outros projetos de código aberto usados pelo launcher": ["Other open-source projects used by the launcher", "Otros proyectos de código abierto usados por el launcher"],
+  "Avisos legais": ["Legal notices", "Avisos legales"],
+  "Não é um produto oficial do Minecraft. Não é aprovado nem associado à Mojang ou à Microsoft. Minecraft é marca registrada da Mojang Synergies AB.": ["Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft. Minecraft is a trademark of Mojang Synergies AB.", "No es un producto oficial de Minecraft. No está aprobado ni asociado con Mojang o Microsoft. Minecraft es una marca registrada de Mojang Synergies AB."],
+  "O launcher não inclui arquivos do jogo: o Minecraft: Java Edition é baixado dos servidores da Mojang com a sua conta Microsoft, que precisa ter o jogo comprado.": ["The launcher ships no game files: Minecraft: Java Edition is downloaded from Mojang's servers with your Microsoft account, which must own the game.", "El launcher no incluye archivos del juego: Minecraft: Java Edition se descarga de los servidores de Mojang con tu cuenta Microsoft, que debe tener el juego comprado."],
+  "O runtime Java do Android é uma versão modificada do PojavLauncher (LGPL-3.0). Você pode baixar o código-fonte exato de cada versão no repositório e trocar essa parte por uma versão sua.": ["The Android Java runtime is a modified version of PojavLauncher (LGPL-3.0). You can get the exact source code of every release from the repository and replace that part with your own build.", "El runtime Java de Android es una versión modificada de PojavLauncher (LGPL-3.0). Puedes descargar el código fuente exacto de cada versión en el repositorio y reemplazar esa parte por tu propia versión."],
+  "Créditos e licenças": ["Credits and licenses", "Créditos y licencias"],
+  "Motor em Rust que reimplementa o cliente do Minecraft: Java Edition. É o modo \"Rust (Vulkan)\" no desktop.": ["Rust engine that reimplements the Minecraft: Java Edition client. It powers the \"Rust (Vulkan)\" mode on desktop.", "Motor en Rust que reimplementa el cliente de Minecraft: Java Edition. Es el modo \"Rust (Vulkan)\" en el escritorio."],
+  "Port do Horizon para Android (Vulkan, controles de toque). É o modo Rust no celular.": ["Android port of Horizon (Vulkan, touch controls). It powers the Rust mode on phones.", "Port de Horizon para Android (Vulkan, controles táctiles). Es el modo Rust en el móvil."],
+  "Runtime Java no Android (JVM, renderizadores, entrada). Roda o Minecraft: Java Edition original no celular.": ["Java runtime for Android (JVM, renderers, input). Runs the original Minecraft: Java Edition on phones.", "Runtime Java para Android (JVM, renderizadores, entrada). Ejecuta el Minecraft: Java Edition original en el móvil."],
+  "GLFW, SDL e mojoexec adaptados para Android, usados dentro do runtime Java.": ["GLFW, SDL and mojoexec adapted for Android, used inside the Java runtime.", "GLFW, SDL y mojoexec adaptados para Android, usados dentro del runtime Java."]
 };
 export function tr(text: string): string {
  const language = detectLanguage();

@@ -13,7 +13,7 @@
 	import { app, PERF_PROFILES, suggestedMemory, toasts } from '$lib/state.svelte';
 	import { isTauri, openFolder, openUrl } from '$lib/platform';
 	import { DEFAULT_MS_CLIENT_ID } from '$lib/services/microsoft-auth';
-	import { CheckCircle2, Cpu, ExternalLink, FolderOpen, LogIn, RefreshCw, RotateCcw, Save, ShieldCheck } from 'lucide-svelte';
+	import { CheckCircle2, Cpu, ExternalLink, FolderOpen, LogIn, RefreshCw, RotateCcw, Save, ShieldCheck, HeartHandshake } from 'lucide-svelte';
 
 
 	const s = $state(structuredClone($state.snapshot(app.settings)));
@@ -264,12 +264,17 @@
 					TropicaliaLauncher v0.1.0 · Sistema: {app.system.os} {app.system.arch} · {app.system.cpus} núcleos de CPU · {(app.system.totalMemoryMb / 1024).toFixed(1)} GB de RAM.
 				</p>
 				<p class="tp-muted text-[11.5px] mt-0.5">
-					Minecraft é marca registrada da Mojang Studios / Microsoft. Este launcher é independente e de código aberto.
+					Não é um produto oficial do Minecraft nem associado à Mojang ou à Microsoft. Launcher independente e de código aberto.
 				</p>
 			</div>
-			<PixelButton size="sm" icon={RefreshCw} class="shrink-0" onclick={() => app.checkUpdates(true)}>
-				{tr("Verificar atualizações")}
-			</PixelButton>
+			<div class="flex shrink-0 flex-wrap gap-2">
+				<PixelButton size="sm" variant="ghost" icon={HeartHandshake} onclick={() => goto('/sobre')}>
+					{tr("Créditos e licenças")}
+				</PixelButton>
+				<PixelButton size="sm" icon={RefreshCw} onclick={() => app.checkUpdates(true)}>
+					{tr("Verificar atualizações")}
+				</PixelButton>
+			</div>
 		</div>
 	</TropicaliaCard>
 </div>
